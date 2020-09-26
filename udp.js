@@ -36,10 +36,10 @@
     define('udper', e);
   }
 })(this, function (exports) {
-  const utils = require('../common/utils')
-  const cache = require('../common/cache')
-  const BitSet = require('../common/BitSet.js').BitSet
-  const _event = require('../common/event.js')
+  const utils = require('./common/utils')
+  const cache = require('./common/cache')
+  const BitSet = require('./common/BitSet.js').BitSet
+  const _event = require('./common/event.js')
 
   const {
     Messge
