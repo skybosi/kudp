@@ -33,7 +33,7 @@
   const e = typeof exports == 'object' ? exports : typeof g == 'object' ? g : {};
   f(e);
   if (typeof define == 'function' && define.amd) {
-    define('udper', e);
+    define('kudp', e);
   }
 })(this, function (exports) {
   const utils = require('./common/utils')
@@ -655,9 +655,16 @@
       this.create(port);
     }
     create(port) {
+      if (typeof wx.createUDPSocket !== 'function') {
+        throw Error("udp socket is not support!!!");
+      }
       try {
-        this.udper = wx.createUDPSocket();
-        this.udper.bind(port);
+        this.kudper = wx.createUDPSocket();
+        if (this.kudper) {
+          this.kudper.bind(port);
+        } else {
+          throw Error("udp bind socket error!!!");
+        }
       } catch (e) {
         console.error("createUDPSocket:", e);
         throw Error("create udp socket error!!!");
@@ -665,7 +672,7 @@
     }
     onClose() {
       return new Promise((resolver) => {
-        this.udper.onClose(function (res) {
+        this.kudper.onClose(function (res) {
           console.log("onClose: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
@@ -676,7 +683,7 @@
     }
     offClose() {
       return new Promise((resolver) => {
-        this.udper.offClose(function (res) {
+        this.kudper.offClose(function (res) {
           console.log("offClose: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
@@ -687,7 +694,7 @@
     }
     onError() {
       return new Promise((resolver) => {
-        this.udper.onError(function (res) {
+        this.kudper.onError(function (res) {
           console.log("onError: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
@@ -698,7 +705,7 @@
     }
     offError() {
       return new Promise((resolver) => {
-        this.udper.offError(function (res) {
+        this.kudper.offError(function (res) {
           console.log("offError: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
@@ -709,7 +716,7 @@
     }
     onListening() {
       return new Promise((resolver) => {
-        this.udper.onListening(function (res) {
+        this.kudper.onListening(function (res) {
           resolver({
             message: utils.NewAb2Str(res.message),
             IPinfo: res.remoteInfo,
@@ -720,7 +727,7 @@
     offListening() {
       let self = this;
       return new Promise((resolver) => {
-        this.udper.offListening(function (res) {
+        this.kudper.offListening(function (res) {
           self.onError();
           self.offError();
           resolver({
@@ -732,18 +739,18 @@
     }
     offMessage() {
       return new Promise(() => {
-        this.udper.offMessage(function () { });
+        this.kudper.offMessage(function () { });
       });
     }
     onMessage() {
       let self = this;
-      self.udper.onMessage(function (res) {
+      self.kudper.onMessage(function (res) {
         self._onMessageHandler(res);
       });
     }
     // 私有方法
     _send(ip, port, msg) {
-      return this.udper.send({ address: ip, port: port, message: msg });
+      return this.kudper.send({ address: ip, port: port, message: msg });
     }
   }
 
@@ -765,7 +772,6 @@
       this.fdset = new Fd();
       this.timer = {}
       this.seqer = new SeqManage();
-      SeqManage.testSeqManage();
       this.recver = {}
       this.stat = new Stat();
       // 获取随机分配的设备id，用于唯一标识
@@ -799,7 +805,7 @@
 
     // 初始化udp相关回调
     _init() {
-      if (this.udper) {
+      if (this.kudper) {
         this.onListening();
         this.offListening();
         this.onMessage();
@@ -1147,7 +1153,7 @@
   }
 
   // 实现可靠的udp封装类
-  class Udper extends BaseUdper {
+  class kudp extends BaseUdper {
     constructor(port, event) {
       super(port)
       // 用于与业务层的事件通知，将通知上报到业务层
@@ -1379,7 +1385,7 @@
     }
   }
 
-  exports.Udper = Udper;
+  exports.kudp = kudp;
   exports.Header = Header;
   exports.SeqManage = SeqManage;
 });
