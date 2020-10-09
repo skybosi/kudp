@@ -232,6 +232,45 @@ const IsLanIP = (ip) => {
   ) ? true : false;
 }
 
+//数组中删除指定一项数据
+const remove = (arr, val) => {
+  if (arr && 'Array' === Type(arr)) {
+    var index = arr.indexOf(val);
+    if (index > -1) {
+      arr.splice(index, 1);
+    }
+  }
+  return;
+};
+
+
+const pushAtSortPosition = (array, item, compareFunction, noCopy) => {
+  compareFunction = compareFunction ? compareFunction : function (a, b) { return a - b; }
+  var ret = noCopy ? array : array.slice();
+  var high = ret.length - 1, low = 0, mid = 0;
+  if (ret.length === 0) {
+    ret.push(item);
+    return ret;
+  }
+  while (low <= high) {
+    // https://github.com/darkskyapp/binary-search
+    // http://googleresearch.blogspot.com/2006/06/extra-extra-read-all-about-it-nearly.html
+    mid = low + (high - low >> 1);
+    var _cmp = compareFunction(ret[mid], item);
+    if (_cmp <= 0.0) {
+      // searching too low
+      low = mid + 1;
+    } else {
+      // searching too high
+      high = mid - 1;
+    }
+  }
+  var cmp = compareFunction(ret[mid], item);
+  if (cmp <= 0.0) { mid++; }
+  ret.splice(mid, 0, item);
+  return ret;
+}
+
 
 module.exports = {
   Pad: pad,
@@ -239,10 +278,12 @@ module.exports = {
   Crc16: crc16,
   IsIP: isIP,
   Int2Ip: int2Ip,
+  Remove: remove,
   Ip2Int: ip2Int,
   IsLanIP: IsLanIP,
   NewAb2Str: newAb2Str,
   RandomNum: randomNum,
   FormatTime: formatTime,
   GetTimestamp: getTimestamp,
+  PushS: pushAtSortPosition,
 }
