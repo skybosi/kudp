@@ -2,7 +2,7 @@
   const e = typeof exports == 'object' ? exports : typeof g == 'object' ? g : {};
   f(e);
   if (typeof define == 'function' && define.amd) {
-    define('udper', e);
+    define('message', e);
   }
 })(this, function (exports) {
 
