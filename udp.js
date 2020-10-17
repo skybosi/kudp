@@ -43,8 +43,14 @@
   const BitSet = require('./common/BitSet.js').BitSet
   const event = require('./common/event.js')
   const seqTree = require('./common/tree').RBTree
+  const task = require('./common/task').task
+  const timer = require('./common/timer')
+  const heapify = require('./common/heapify')
 
   const { Messge } = require("./message");
+
+  const PROTONAME = 'kudp'
+  const VERSION = 0x0 // kudp version
 
   const SEP = ':'
   const IDLEN = 5
@@ -53,7 +59,6 @@
   const ISN_INTERVAL = 1 << RIGHT_MOVE  // 2048
   const MAX_SEQ = (-1 >>> 32) + 1
   const EXPIRE = 60000 // 60s
-  const VERSION = 0x0  // kudp version
   const FACTOR = 4     // 默认放大因子
   const BASE_SECTION = 256 // 基础段长度
 
@@ -269,6 +274,7 @@
      */
     location(seq) {
       let isn = -1;
+
       function bs(arr, key) {
         var low = 0, high = arr.length - 1;
         while (low <= high) {
@@ -377,7 +383,7 @@
   const ABEGIN = 0x80 | BEGIN  // 首个数据包
   const ADOING = 0x80 | DOING  // 大型数据包中间数据包
   const ADONED = 0x80 | DONED  // 结束数据包
-  const ABDD = 0x80 | BDD  // 对于小型数据, 首个数据包既是中间数据包又是最后一个数据包
+  const ABDD = 0x80 | BDD      // 对于小型数据, 首个数据包既是中间数据包又是最后一个数据包
 
   // header反消息类型
   const rHeaderType = {
@@ -810,17 +816,39 @@
   }
 
   /**
+   * 接收器：
    * 接收到数据包后，做上报业务层管理器
+   * 在一次单项的发送的过程中
+   *  发送方：仅仅只会接收  ABROAD ~ ABDD
+   *  接收方：仅仅只会接收  BROAD ~ BDD
+   * 对于接收器来说，只会处理接收到的数据包，并对接收到的数据包做一些相应的处理
    */
   class Recver {
-    static prefix = 'kudp:' + VERSION + ':recver:';
-    constructor(ctx) {
-      this.ctx = ctx;
-      this.timer = {};
-      this.queue = {};
-      this.queue2 = new seqTree(Recver.prefix, function (a, b) { return a.seq - b.seq; });
-      this.queueArray = [];
-      this.staging = {};
+    static UPCD_SIZE = 5;  // 触发上报数据包的最小限制
+    static prefix = PROTONAME + SEP + VERSION + SEP + 'recver' + SEP;
+    constructor(upcb, doackcb, ackcb) {
+      this.timers = {};
+      this.staging = {}; // 暂存区
+      this.upcb = ("Function" === utils.Type(upcb) ? upcb : this._upcb); // 上报上层回调
+      this.doackcb = ("Function" === utils.Type(doackcb) ? doackcb : this._doackcb); // 接收到消息后，回复ack
+      this.ackcb = ("Function" === utils.Type(ackcb) ? ackcb : this._ackcb); // 接收到Ack类型数据包回调
+      seqTree.testRBTree();
+      this.queue = new seqTree(Recver.prefix, (a, b) => a.seq - b.seq); // 处理队列
+    }
+
+    // 上报上层回调
+    _upcb() {
+      console.log("上报(upcb)回调: ", arguments);
+    }
+
+    // 接收到消息后，发送ack
+    _doackcb() {
+      console.log("Ack(doackcb)回调: ", arguments);
+    }
+
+    // 接收到Ack类型数据包回调
+    _ackcb() {
+      console.log("一次上报后释放(ackcb)回调: ", arguments);
     }
 
     // 接收到数据
@@ -832,59 +860,60 @@
       }
     }
 
-    // 处理来自网络的数据包 推送一个接收到的数据到接收队列
+    // 接收方：处理来自网络的数据包 推送一个接收到的数据到接收队列，
     push(mtype, seq, peerInfo, payload, rangesize, version) {
       let self = this;
       // 发送ack数据包
-      this.ack(peerInfo.address, peerInfo.port, mtype, seq);
+      this.doackcb(peerInfo.address, peerInfo.port, mtype, seq);
       let data = { seq: seq, message: payload, IPinfo: peerInfo, iPint: peerInfo.ipint, };
       switch (mtype) {
         case DOING:
           data.type = 'DOING';
-          this.stage(mtype, seq, peerInfo, data);
+          this.stage(mtype, seq, peerInfo, payload);
           break;
         case BEGIN:
           data.type = 'BEGIN';
-          this.queue2.insert({ seq: seq, L: seq + rangesize, Q: [seq], T: BEGIN, V: version })
-          this.queue[seq] = this.queue[seq] || {}
-          this.queue[seq]['L'] = seq + rangesize;
-          this.queue[seq]['Q'] = [seq];
-          this.queue[seq]['T'] = BEGIN;
-          this.queue[seq]['V'] = version;
-          utils.PushS(this.queueArray, seq);
+          this.begin(seq, peerInfo, payload, rangesize, version);
           break;
         case BDD:
           data.type = 'BDD';
-          this.queue2.insert({ seq: seq, L: seq + rangesize, Q: [seq], T: BEGIN, V: version })
-          this.queue[seq] = this.queue[seq] || {}
-          this.queue[seq]['L'] = seq + rangesize;
-          this.queue[seq]['Q'] = [seq];
-          this.queue[seq]['T'] = BDD;
-          this.queue[seq]['V'] = version;
-          this.report(mtype, data);
+          this.queue.insert({ seq: seq, peer: peerInfo, L: seq + rangesize, Q: [{ [seq]: payload }], T: BDD, V: version })
+          this.upcb(mtype, seq, peerInfo, payload);
           break;
         case DONED:
           data.type = 'DONED';
           break;
         case BROAD:
           data.type = 'BROAD';
-          this.report(mtype, data);
+          this.upcb(mtype, seq, peerInfo, payload);
           break;
         case MULTI:
           data.type = 'MULTI';
-          this.report(mtype, data);
+          this.upcb(mtype, seq, peerInfo, payload);
           break;
         default:
           break;
       }
-      // 在两倍的ACK_TIMEOUT，仍然没有收到对方的重复数据包，即可认为对方已经收到对应的seq的ack，即可释放对应seq
-      let seqTimerid = setTimeout(function () {
-        self.freeSeq(seq);
-      }, ACK_TIMEOUT * 2);
-      this.timer[Recver.prefix + seq] = seqTimerid;
+      /**
+       * 原则：尽可能的保证对方收到ACK。
+       * 1. 在2 * ACK_TIMEOUT，仍然没有收到对方的重复数据包，即可认为对方已经收到对应的seq的ack，即可释放对应seq
+       * 2. 如果重新收到同一seq的数据包，说明对方没有收到ACK，此时需要重新启动同一个定时器，避免seq被释放
+       */
+      let exist_timerid = this.timers[Recver.prefix + seq]
+      if (!exist_timerid) {
+        let seqTimerid = new timer({
+          onrestart: (...args) => { console.log(args, 'timer restart') },
+          onend: (...args) => { this.freeSeq(args[0]); }
+        }, seq);
+        seqTimerid.start(ACK_TIMEOUT * 2);
+        // 记录下每个数据包的定时器，在必要的时候重置定时器
+        this.timers[Recver.prefix + seq] = seqTimerid;
+      } else {
+        exist_timerid.restart(ACK_TIMEOUT * 2);
+      }
     }
 
-    // 处理来自网络的确认包 接收到ack数据包处理
+    // 发送方：处理来自网络的确认包 接收到ack数据包处理
     shift(mtype, seq, peerInfo, payload) {
       let data = { seq: seq, message: payload, IPinfo: peerInfo, iPint: peerInfo.ipint, };
       // 针对数据包不同类型特殊处理
@@ -904,43 +933,92 @@
         default:
           break;
       }
-      // 删除发送窗口中的分配的序号
-      if (this.ctx.seqer.location(seq)) {
-        if (BDD === mtype || DONED === mtype) {
-          this.ctx.seqer.free(seq);
-        } else {
-          this.ctx.seqer.del(seq);
+      this.ackcb(mtype, seq, peerInfo, payload)
+    }
+
+    // TODO 序号比较器, 由于比较器与插入时不一样，可能导致查询效率问题
+    seqcmp(data, ori) {
+      if (ori.seq <= data.seq && ori.L > data.seq) {
+        return 0;
+      } else if (ori.seq > data.seq) {
+        return -1
+      } else if (ori.L <= data.seq) {
+        return 1;
+      }
+      return -1;
+    }
+
+    // 处理 BEGIN 数据包时，需要检测是否存在预先到达的本数据块的 DOING / DONED 包
+    begin(isn, peerInfo, payload, rangesize, version) {
+      let node = {
+        seq: isn, peer: peerInfo,
+        L: isn + rangesize,
+        P: isn,                    // 待上报的最小seq
+        Q: new heapify(rangesize),
+        T: BEGIN, V: version
+      }
+      // 用优先队列实现接收的数据包排序
+      node['Q'].push(payload, isn);
+      // insert 是否是覆盖的, flag == true, 表示覆盖写
+      this.queue.insert(node, null, true);
+      // 检测所有暂存区中已有的seq
+      for (var seq in this.staging) {
+        let seq_data = this.staging[seq];
+        let peer = seq_data[2];
+        if (peer.address === peerInfo.address &&
+          peer.port === peerInfo.port &&  // 必须是同一个ip:port
+          seq >= node.seq && seq < node.L) {
+          node['Q'].push(payload, seq);
         }
       }
-      // 释放接收窗口中的来自指定peer的序号
-      delete this.ctx.recver[peerInfo.ipseq];
-      // 通知超时定时器删除超时动作
-      data.type = HeaderType[mtype];
-      this.ctx.$e.emit(peerInfo.ipseq, data);
-      console.log({ mtype, seq, peerInfo, data })
+      this.checkQ(node);
+    }
+
+    // 检测数据队列中的内容是否超过了可上报下限
+    checkQ(node) {
+      let Q = node['Q'];
+      if (Q && (Q.size >= Recver.UPCD_SIZE || Q.size === Q.capacity)) {
+        let i = 0;
+        // TODO, 数据组装
+        let payloads = null;
+        while (i++ <= Recver.UPCD_SIZE || 0 === Q.size) {
+          if (Q.peekPriority() === node['P']) {
+            payloads += Q.pop();
+            node['P']++;
+          } else {
+            break;
+          }
+        }
+        payloads && this.upcb(node['T'], node['P'], node['peer'], payloads);
+      }
     }
 
     // 暂存区处理 NOTE：内存问题
-    stage(mtype, seq, peerInfo, data) {
+    stage(mtype, seq, peerInfo, payload) {
       if (DOING === mtype || DONED === mtype) {
-        this.staging[seq] = [mtype, seq, peerInfo, data];
+        let isn_info = this.queue.find({ seq: seq }, this.seqcmp);
+        if (isn_info) {
+          isn_info.data['Q'].push(payload, seq);
+          this.checkQ(isn_info.data);
+        } else {
+          this.staging[seq] = [mtype, seq, peerInfo, payload];
+        }
       }
-    }
-
-    // 回复发送端ack
-    ack(address, port, mtype, seq) {
-      // 发送确认数据包
-      this.ctx._sendAck(address, port, mtype, seq);
     }
 
     // 释放接收队列中的已经确认的seq
     freeSeq(seq) {
-      if (this.queue[seq]) {
-        // 删除已确认的seq
-        utils.Remove(this.queue[seq]['Q'], seq);
+      let exist = this.queue.find({ seq: seq })
+      if (exist) {
+        let seqdata = exist.data;
+        // TODO：删除已确认的seq
+        utils.Remove(seqdata['Q'], seq);
+        // 删除定时器
+        delete this.timers[Recver.prefix + seq];
         // 如果是BDD || DONED，同时需要释放对应的queue key
-        if (BDD === this.queue[seq]['T'] || DONED === this.queue[seq]['T']) {
-          delete this.queue[seq];
+        if (BDD === seqdata['T'] || DONED === seqdata['T']) {
+          // TODO：是否可一同find后的迭代器做remove操作，避免多余的查询
+          this.queue.remove({ seq: seq })
         } else {
           console.log('freeSeq #: ', seq);
         }
@@ -949,37 +1027,52 @@
       }
     }
 
-    // 向业务层上报接收到的数据包
-    report(mtype, data) {
-      switch (mtype) {
-        case BROAD:
-          data.type = 'BROAD';
-          this.ctx._handleSync(data);
-          break;
-        case MULTI:
-          data.type = 'MULTI';
-          this.ctx._handleMulti(data);
-          break;
-        case BEGIN:
-          data.type = 'BEGIN';
-          this.ctx.event.emit("onMessage", data);
-          break;
-        case DOING:
-          data.type = 'DOING';
-          this.ctx.event.emit("onMessage", data);
-          break;
-        case DONED:
-          data.type = 'DONED';
-          this.ctx.event.emit("onMessage", data);
-          break;
-        case BDD:
-          data.type = 'BDD';
-          this.ctx.event.emit("onMessage", data);
-          break;
-        default:
-          data.type = mtype;
-          this.ctx.event.emit("onMessage", data);
-          break;
+    // Test
+    static testRecver() {
+      let rQueue = new Recver();
+      // 支持同时发送数据内容个数
+      let concurrency = 5;
+      let peerInfo = { address: "test-ip-address", port: 5328 };
+      const t = new task(concurrency, () => {
+        console.log(rQueue, 'All task done!');
+      });
+      for (let i = 0; i < concurrency; ++i) {
+        // 生成 BEGIN/BDD 的isn
+        let seq = utils.RandomNum(1, 100000);
+        // 通过随机确定测试类型是BDD还是BEGIN
+        let testBDD = ((concurrency + utils.RandomNum(1, 100)) % concurrency == 0)
+        let mtype = testBDD ? BDD : BEGIN;
+        // 生成 rangesize, 如果非BDD，随机生成一个长度
+        let rangesize = (BDD != mtype) ? utils.RandomNum(1, 20) : 1;
+
+        // 测试任务函数
+        function task(mtype, seq, rangesize) {
+          let payload = "Testing" + SEP + HeaderType[mtype] + SEP + seq;
+          rangesize = rangesize ? rangesize : 1;
+          rQueue.onMessage(mtype, seq, peerInfo, payload, rangesize, VERSION);
+          if (BDD === mtype) {
+            console.log("Tested" + SEP + HeaderType[mtype] + SEP + seq);
+          } else if (BEGIN === mtype) {
+            // 模拟 DOING 数据包
+            function Doing(imtype, seq, isn, rangesize) {
+              let iseq = seq + 1;
+              let payload = "Testing" + SEP + HeaderType[mtype] + SEP + iseq;
+              rQueue.onMessage(imtype, iseq, peerInfo, payload);
+              if (DONED === imtype) {
+                console.log("Tested" + SEP + HeaderType[mtype] + SEP + iseq)
+                return;
+              }
+              // 下一次任务
+              imtype = (iseq < isn + rangesize) ? DOING : DONED;
+              // 如果是 iseq < seq + rangesize 将模拟
+              t.addTask(utils.RandomNum(0, 300), Doing, imtype, iseq, isn, rangesize);
+            }
+            Doing(DOING, seq, seq, rangesize);
+          }
+        }
+
+        // 添加到测试任务中
+        t.addTask(utils.RandomNum(0, 300), task, mtype, seq, rangesize);
       }
     }
   }
@@ -1003,7 +1096,7 @@
       this.timer = {}
       this.seqer = new SeqManage();
       this.recver = {}
-      this.rQueue = new Recver(this);
+      this.rQueue = new Recver(this._handleOnMessage.bind(this), this._sendAck.bind(this), this._handleAckMessage.bind(this));
       this.stat = new Stat();
       // 获取随机分配的设备id，用于唯一标识
       this.id = this.getId();
@@ -1146,51 +1239,42 @@
     }
 
     // 处理来自网络的数据包
-    _handleOnMessage(mtype, seq, peerInfo, message) {
-      // console.log("onMessage: ", res)
+    _handleOnMessage(mtype, seq, peerInfo, payload) {
       let data = {
         seq: seq,
-        message: message,
+        message: payload,
         IPinfo: peerInfo,
         iPint: peerInfo.ipint,
       };
-      // this.seqer.check(seq)
-      // 发送确认数据包
-      this._sendAck(peerInfo.address, peerInfo.port, mtype, seq);
-      if (!this.recver[peerInfo.ipseq]) {
-        switch (mtype) {
-          case BROAD:
-            data.type = 'BROAD';
-            this._handleSync(data);
-            break;
-          case MULTI:
-            data.type = 'MULTI';
-            this._handleMulti(data);
-            break;
-          case BEGIN:
-            data.type = 'BEGIN';
-            this.event.emit("onMessage", data);
-            break;
-          case DOING:
-            data.type = 'DOING';
-            this.event.emit("onMessage", data);
-            break;
-          case DONED:
-            data.type = 'DONED';
-            this.event.emit("onMessage", data);
-            break;
-          case BDD:
-            data.type = 'BDD';
-            this.event.emit("onMessage", data);
-            break;
-          default:
-            data.type = mtype;
-            this.event.emit("onMessage", data);
-            break;
-        }
-        this.recver[peerInfo.ipseq] = data
-        // console.info("seqer:", this.seqer, seq, mtype);
-        // this.seqer.free(seq);
+      switch (mtype) {
+        case BROAD:
+          data.type = 'BROAD';
+          this._handleSync(data);
+          break;
+        case MULTI:
+          data.type = 'MULTI';
+          this._handleMulti(data);
+          break;
+        case BEGIN:
+          data.type = 'BEGIN';
+          this.event.emit("onMessage", data);
+          break;
+        case DOING:
+          data.type = 'DOING';
+          this.event.emit("onMessage", data);
+          break;
+        case DONED:
+          data.type = 'DONED';
+          this.event.emit("onMessage", data);
+          break;
+        case BDD:
+          data.type = 'BDD';
+          this.event.emit("onMessage", data);
+          break;
+        default:
+          data.type = mtype;
+          this.event.emit("onMessage", data);
+          break;
       }
       console.info("online", this.online);
       console.info("current", this);
@@ -1447,7 +1531,7 @@
           icon: 'loading'
         });
         self.getLocalip(true)
-        setTimeout(function () {
+        setTimeout(() => {
           wx.hideToast({
             complete: (res) => { },
           })
@@ -1642,4 +1726,5 @@
   exports.kudp = kudp;
   exports.Header = Header;
   exports.SeqManage = SeqManage;
+  exports.Recver = Recver;
 });

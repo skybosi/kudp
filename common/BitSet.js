@@ -1,4 +1,14 @@
-//Matt Krick, matt.krick@gmail.com, MIT License
+/**
+ * Tks https://github.com/mattkrick/fast-bitset
+ *  Matt Krick, matt.krick@gmail.com, MIT License
+ * A fast bitset with some nice methods.
+ * ##Features
+ *   1. Outperforms all other bitset packages in terms of speed and space
+ *   2.All bit operations execute in O(1) time (does not iterate through bits)
+ *   3. Useful methods for graph algorithms
+ *   4. Any array that stores booleans can safely be replaced by a bitset for improved speed
+ *   5. Uses 64x less space than a nontyped array
+ */
 
 (function (g, f) {
   const e = typeof exports == 'object' ? exports : typeof g == 'object' ? g : {};

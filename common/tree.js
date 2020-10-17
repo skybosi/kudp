@@ -49,13 +49,17 @@
       this.size = 0;
     }
     // returns node data if found, null otherwise
-    find(data) {
+    find(data, cmp) {
       if (!this._comparator) {
         this._comparator = gen_comparator(data)
       }
+      let _comparator = this._comparator
+      if (cmp && "function" === typeof (cmp)) {
+        _comparator = cmp;
+      }
       var res = this._root;
       while (res !== null) {
-        var c = this._comparator(data, res.data);
+        var c = _comparator(data, res.data);
         if (c === 0) {
           return res;
         } else {
@@ -65,14 +69,18 @@
       return null;
     }
     // returns iterator to node if found, null otherwise
-    findIter(data) {
+    findIter(data, cmp) {
       if (!this._comparator) {
         this._comparator = gen_comparator(data)
+      }
+      let _comparator = this._comparator
+      if (cmp && "function" === typeof (cmp)) {
+        _comparator = cmp;
       }
       var res = this._root;
       var iter = this.iterator();
       while (res !== null) {
-        var c = this._comparator(data, res.data);
+        var c = _comparator(data, res.data);
         if (c === 0) {
           iter._cursor = res;
           return iter;
@@ -84,15 +92,18 @@
       return null;
     }
     // Returns an iterator to the tree node at or immediately after the item
-    lowerBound(item) {
+    lowerBound(item, cmp) {
       if (!this._comparator) {
         this._comparator = gen_comparator(data)
       }
+      let _comparator = this._comparator
+      if (cmp && "function" === typeof (cmp)) {
+        _comparator = cmp;
+      }
       var cur = this._root;
       var iter = this.iterator();
-      var cmp = this._comparator;
       while (cur !== null) {
-        var c = cmp(item, cur.data);
+        var c = _comparator(item, cur.data);
         if (c === 0) {
           iter._cursor = cur;
           return iter;
@@ -102,7 +113,7 @@
       }
       for (var i = iter._ancestors.length - 1; i >= 0; --i) {
         cur = iter._ancestors[i];
-        if (cmp(item, cur.data) < 0) {
+        if (_comparator(item, cur.data) < 0) {
           iter._cursor = cur;
           iter._ancestors.length = i;
           return iter;
@@ -111,16 +122,35 @@
       iter._ancestors.length = 0;
       return iter;
     }
-    // Returns an iterator to the tree node immediately after the item
-    upperBound(item) {
+    // Returns an iterator to the tree node immediately after the item    
+    upperBound(item, cmp) {
       if (!this._comparator) {
         this._comparator = gen_comparator(data)
       }
-      var iter = this.lowerBound(item);
-      var cmp = this._comparator;
-      while (iter.data() !== null && cmp(iter.data(), item) === 0) {
-        iter.next();
+      let _comparator = this._comparator
+      if (cmp && "function" === typeof (cmp)) {
+        _comparator = cmp;
       }
+      var cur = this._root;
+      var iter = this.iterator();
+      while (cur !== null) {
+        var c = _comparator(item, cur.data);
+        if (c === 0) {
+          iter._cursor = cur;
+          return iter;
+        }
+        iter._ancestors.push(cur);
+        cur = cur.get_child(c < 0);
+      }
+      for (var i = iter._ancestors.length - 1; i >= 0; --i) {
+        cur = iter._ancestors[i];
+        if (_comparator(item, cur.data) > 0) {
+          iter._cursor = cur;
+          iter._ancestors.length = i;
+          return iter;
+        }
+      }
+      iter._ancestors.length = 0;
       return iter;
     }
     // returns null if tree is empty
@@ -177,46 +207,45 @@
     }
     // return range data from tree
     range(s, e) {
-      let ret = [], exist = true;
+      let ret = [];
       try {
         if (!s && !e) {
           this.each(function (d, o) { ret.push({ data: d, other: o }) })
         } else if (s && !e) {
-          let iter = this.lowerBound(s);
-          if (this.equal(iter.data(), s)) {
-            ret.push({ data: iter.data(), other: iter.other() });
+          let iters = this.lowerBound(s);
+          if (this.equal(iters.data(), s)) {
+            ret.push({ data: iters.data(), other: iters.other() });
           }
-          while (iter.next()) {
-            ret.push({ data: iter.data(), other: iter.other() });
+          while (iters.next()) {
+            ret.push({ data: iters.data(), other: iters.other() });
           }
         } else if (!s && e) {
           let itere = this.lowerBound(e);
           if (this.equal(itere.data(), e)) {
-            ret.unshift({ data: iter.data(), other: iter.other() });
+            ret.unshift({ data: itere.data(), other: itere.other() });
           }
           while (itere.prev()) {
-            ret.unshift({ data: iter.data(), other: iter.other() });
+            ret.unshift({ data: itere.data(), other: itere.other() });
           }
         } else if (s && e) {
           let iters = this.lowerBound(s);
           let itere = this.lowerBound(e);
           if (this.equal(iters.data(), s)) {
-            ret.push({ data: iter.data(), other: iter.other() });
+            ret.push({ data: iters.data(), other: iters.other() });
           }
-          while (iters.next() != itere) {
-            ret.push({ data: iter.data(), other: iter.other() });
+          while (!this.equal(iters.next(), itere.data())) {
+            ret.push({ data: iters.data(), other: iters.other() });
           }
           if (this.equal(itere.data(), e)) {
-            ret.push({ data: iter.data(), other: iter.other() });
+            ret.push({ data: itere.data(), other: itere.other() });
           }
         } else {
-          ret = [];
-          exist = false;
+          ret = null;
         }
       } catch (error) {
-        exist = false
+        ret = null;
       }
-      return ret, exist
+      return ret
     }
     // return left like data from tree
     like(data) {
@@ -441,6 +470,39 @@
       let it = this.lowerBound(data);
       return it.set(newdata, newother);
     }
+    // Test
+    static testBinTree() {
+      var tree = new BinTree();
+      tree.insert("I");
+      tree.insert("Love");
+      tree.insert("Love1");
+      tree.insert("Love14");
+      tree.insert("hello");
+      tree.insert("bintree");
+      tree.insert("China");
+      // treval
+      console.log('-----------bintree treval------------')
+      tree.each(function (d) {
+        console.log(d);
+      });
+      tree.range() // 全量遍历
+      tree.range("Love") // 存在且只有起点
+      tree.range("Love", null, "L") // 存在且只有起点（包括起点）
+      tree.range(null, "Love") // 存在且只有终点
+      tree.range(null, "Love", "R") // 存在且只有终点（包括终点）
+      tree.range("a") // 不存在且只有起点
+      tree.range(null, "a") // 不存在且只有终点
+      tree.range("a", "b") // 不存在起点终点
+      console.log('---------bintree range get-----------')
+      let it = tree.findIter("Love")
+      console.log('start: ', it.data())
+      while (it.next()) {
+        console.log(it.data())
+      }
+      console.log('---------bintree like get-----------')
+      let likeret = tree.like("Love")
+      console.log('like: ', likeret)
+    }
   }
 
   ////////////////////////////////////////////////RBTREE///////////////////////////////////////////
@@ -500,7 +562,7 @@
       this.size = 0;
     }
     // returns true if inserted, false if duplicate
-    insert(data, other) {
+    insert(data, other, flag) {
       if (!this._comparator) {
         this._comparator = gen_comparator(data)
       }
@@ -523,9 +585,10 @@
         var p = null; // parent
         var node = this._root;
         ggp.right = this._root;
-
+        let MAX_LOOP = 1000;
+        let max_loop = 0;
         // search down
-        while (true) {
+        while (true && max_loop++ < MAX_LOOP) {
           if (node === null) {
             // insert new node at the bottom
             node = new rbNode(data, other);
@@ -554,6 +617,11 @@
 
           // stop if found
           if (cmp === 0) {
+            if (true == flag) {
+              ret = true;
+              node.data = data;
+              node.other = other;
+            }
             break;
           }
 
@@ -661,81 +729,48 @@
     }
     // returns true if update, false if not found
     update(data, newdata, newother) {
-      let it = this.lowerBound(data);
-      return it.set(newdata, newother);
+      this.remove(data);
+      return this.insert(newdata, newother);
     }
-  }
-
-  function testBinTree() {
-    var tree = new BinTree();
-    tree.insert("I");
-    tree.insert("Love");
-    tree.insert("Love1");
-    tree.insert("Love14");
-    tree.insert("hello");
-    tree.insert("bintree");
-    tree.insert("China");
-    // treval
-    console.log('-----------bintree treval------------')
-    tree.each(function (d) {
-      console.log(d);
-    });
-    tree.range() // 全量遍历
-    tree.range("Love") // 存在且只有起点
-    tree.range("Love", null, "L") // 存在且只有起点（包括起点）
-    tree.range(null, "Love") // 存在且只有终点
-    tree.range(null, "Love", "R") // 存在且只有终点（包括终点）
-    tree.range("a") // 不存在且只有起点
-    tree.range(null, "a") // 不存在且只有终点
-    tree.range("a", "b") // 不存在起点终点
-    console.log('---------bintree range get-----------')
-    let it = tree.findIter("Love")
-    console.log('start: ', it.data())
-    while (it.next()) {
-      console.log(it.data())
+    // Test
+    static testRBTree() {
+      var tree = new RBTree('testRBTree', (a, b) => {
+        return a.key > b.key ? 1 : (a.key < b.key ? -1 : 0);
+      });
+      tree.insert({ key: "rbtree" });
+      tree.update({ key: "rbtree" }, { key: "update-rbtree" });
+      tree.insert({ key: "I", data: "1" });
+      tree.insert({ key: "Love", data: "Love1" });
+      tree.insert({ key: "Love", data: "Love2" });
+      tree.insert({ key: "Love", data: "Love3" }, null, true);
+      tree.insert({ key: "Love1", data: "Love1" });
+      tree.insert({ key: "Love14", data: "Love14" });
+      tree.insert({ key: "hello", data: "hello" });
+      tree.insert({ key: "China", data: "中国" });
+      console.log('-----------rbtree treval------------')
+      tree.each(function (d) {
+        console.log(d);
+      });
+      let r = tree.range() // 全量遍历
+      r = tree.range("I") // 存在且只有起点
+      r = tree.range("I", "Love14") // 存在且只有起点（包括起点）
+      r = tree.range(null, "Love") // 存在且只有终点
+      r = tree.range("a") // 不存在且只有起点
+      r = tree.range(null, "a") // 不存在且只有终点
+      r = tree.range("a", "b") // 不存在起点终点
+      console.log('---------rbtree range get-----------')
+      let it = tree.findIter("I")
+      console.log('start: ', it.data())
+      while (it.next()) {
+        console.log(it.data())
+      }
+      console.log('---------rbtree like get-----------')
+      let likeret = tree.like("Lov")
+      console.log('like: ', likeret)
     }
-    console.log('---------bintree like get-----------')
-    let likeret = tree.like("Love")
-    console.log('like: ', likeret)
-  }
-
-  function testRBTree() {
-    var tree = new RBTree();
-    tree.insert("rbtree");
-    tree.update("rbtree", "update-rbtree");
-    tree.insert("I");
-    tree.insert("Love");
-    tree.insert("Love");
-    tree.insert("Love1");
-    tree.insert("Love14");
-    tree.insert("hello");
-    tree.insert("China");
-    console.log('-----------rbtree treval------------')
-    tree.each(function (d) {
-      console.log(d);
-    });
-    tree.range() // 全量遍历
-    tree.range("I") // 存在且只有起点
-    tree.range("I", null, "L") // 存在且只有起点（包括起点）
-    tree.range(null, "I") // 存在且只有终点
-    tree.range(null, "I", "R") // 存在且只有终点（包括终点）
-    tree.range("a") // 不存在且只有起点
-    tree.range(null, "a") // 不存在且只有终点
-    tree.range("a", "b") // 不存在起点终点
-    console.log('---------rbtree range get-----------')
-    let it = tree.findIter("I")
-    console.log('start: ', it.data())
-    while (it.next()) {
-      console.log(it.data())
-    }
-    console.log('---------rbtree like get-----------')
-    let likeret = tree.like("Lov")
-    console.log('like: ', likeret)
   }
 
   exports.RBTree = RBTree;
   exports.rbNode = rbNode;
   exports.BinTree = BinTree;
-  exports.testRBTree = testRBTree;
-  exports.testBinTree = testBinTree;
 });
