@@ -10,13 +10,12 @@
  *   5. Uses 64x less space than a nontyped array
  */
 
-(function (g, f) {
-  const e = typeof exports == 'object' ? exports : typeof g == 'object' ? g : {};
-  f(e);
-  if (typeof define == 'function' && define.amd) {
-    define('BitSet', e);
-  }
-})(this, function (exports) {
+(function (root, factory) {
+  'use strict'
+  if (typeof define === 'function' && define.amd) define([], factory)
+  else if (typeof exports === 'object') module.exports = factory()
+  else root.BitSet = factory()
+}(this, function () {
 
   //each bin holds bits 0 - 30, totaling 31 (sign takes up last bit)
   var BITS_PER_INT = 31;
@@ -642,5 +641,5 @@
     return word1 ^ word2;
   }
 
-  exports.BitSet = BitSet;
-});
+  return BitSet
+}))

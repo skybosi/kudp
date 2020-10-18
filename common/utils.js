@@ -243,6 +243,22 @@ const remove = (arr, val) => {
   return;
 };
 
+// 洗牌算法
+const shuffle = (arr) => {
+  let n = arr.length, random;
+  while (0 != n) {
+    random = (Math.random() * n--) >>> 0; // 无符号右移位运算符向下取整
+    [arr[n], arr[random]] = [arr[random], arr[n]] // ES6的结构赋值实现变量互换
+  }
+  return arr;
+}
+
+// 生成指定范围内的数组
+const range = (start, end) => {
+  var length = end - start;
+  var step = start - 1;
+  return Array.apply(null, { length: length }).map(function (v, i) { step++; return step; });
+}
 
 const pushAtSortPosition = (array, item, compareFunction, noCopy) => {
   compareFunction = compareFunction ? compareFunction : function (a, b) { return a - b; }
@@ -271,15 +287,16 @@ const pushAtSortPosition = (array, item, compareFunction, noCopy) => {
   return ret;
 }
 
-
 module.exports = {
   Pad: pad,
   Type: Type,
   Crc16: crc16,
   IsIP: isIP,
+  Range: range,
   Int2Ip: int2Ip,
   Remove: remove,
   Ip2Int: ip2Int,
+  Shuffle: shuffle,
   IsLanIP: IsLanIP,
   NewAb2Str: newAb2Str,
   RandomNum: randomNum,

@@ -1,10 +1,9 @@
-(function (g, f) {
-    const e = typeof exports == 'object' ? exports : typeof g == 'object' ? g : {};
-    f(e);
-    if (typeof define == 'function' && define.amd) {
-        define('task', e);
-    }
-})(this, function (exports) {
+(function (root, factory) {
+    'use strict'
+    if (typeof define === 'function' && define.amd) define([], factory)
+    else if (typeof exports === 'object') module.exports = factory()
+    else root.task = factory()
+}(this, function () {
     class task {
         constructor(limit, endcb, ...args) {
             this.limit = limit || 2;
@@ -12,11 +11,13 @@
             this.running = []; // 正在运行的任务
             this.endcb = endcb;
             this.args = args;
+            this.cnt = 0;
         }
 
         // promiseCreator 是一个异步函数，return Promise
         // 添加一个任务
         add(promiseCreator) {
+            this.cnt++;
             return new Promise((resolve, reject) => {
                 promiseCreator.resolve = resolve;
                 if (this.running.length < this.limit) {
@@ -41,9 +42,10 @@
 
         // 删除执行过的任务
         remove(promiseCreator) {
+            this.cnt--;
             let index = this.running.findIndex(promiseCreator)
             this.running.splice(index, 1)
-            if (this.running.length <= 0) {
+            if (this.running.length <= 0 || 0 === this.cnt) {
                 if (typeof this.endcb === 'function') {
                     this.endcb(...this.args);
                 }
@@ -74,5 +76,6 @@
             t.addTask(1000, 'task-5');
         }
     }
-    exports.task = task;
-});
+
+    return task
+}))

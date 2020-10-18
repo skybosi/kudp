@@ -21,7 +21,7 @@
         onend: null      // end event handler(when Timer stops without interrupt)
     }
 
-    var Timer = function (options, ...args) {
+    var Timer = function (options, args) {
         if (!(this instanceof Timer)) return new Timer(options)
         this._ = {
             id: +new Date + Math.floor(Math.random() * 10000), // 1000 ID generate in one millisecond
@@ -49,12 +49,12 @@
         this._.timeout = setTimeout(end.bind(this), this._.duration)
         if (typeof this._.options.ontick === 'function') {
             this._.interval = setInterval(function () {
-                trigger.call(this, 'ontick', this.getDuration(), ...this._.args)
+                trigger.call(this, 'ontick', this.getDuration(), this._.args)
             }.bind(this), ++this._.options.tick * 1 /*+this._.options.tick * 1000*/)
         }
         this._.start = +new Date
         this._.status = 'started'
-        trigger.call(this, 'onstart', this.getDuration(), ...this._.args)
+        trigger.call(this, 'onstart', this.getDuration(), this._.args)
         return this
     }
 
@@ -67,12 +67,12 @@
         this._.timeout = setTimeout(end.bind(this), this._.duration)
         if (typeof this._.options.ontick === 'function') {
             this._.interval = setInterval(function () {
-                trigger.call(this, 'ontick', this.getDuration(), ...this._.args)
+                trigger.call(this, 'ontick', this.getDuration(), this._.args)
             }.bind(this), ++this._.options.tick * 1 /*+this._.options.tick * 1000*/)
         }
         this._.restart = +new Date
         this._.status = 'started' // 'restarted'
-        trigger.call(this, 'onrestart', this.getDuration(), ...this._.args)
+        trigger.call(this, 'onrestart', this.getDuration(), this._.args)
         return this
     }
 
@@ -82,7 +82,7 @@
         this._.duration -= (+new Date - this._.start)
         clear.call(this, false)
         this._.status = 'paused'
-        trigger.call(this, 'onpause', this.getDuration(), ...this._.args)
+        trigger.call(this, 'onpause', this.getDuration(), this._.args)
         return this
     }
 
@@ -91,7 +91,7 @@
         if (!/started|paused|restarted/.test(this._.status)) return this
         clear.call(this, true)
         this._.status = 'stopped'
-        trigger.call(this, 'onstop', this.getDuration(), ...this._.args)
+        trigger.call(this, 'onstop', this.getDuration(), this._.args)
         return this
     }
 
@@ -170,10 +170,18 @@
         return +new Date - this._.measures[label || '']
     }
 
+    Timer.prototype.setArgs = function (args) {
+        this._.args = Object.assign((this._.args || {}), args)
+    }
+
+    Timer.prototype.__defineSetter__('args', function (args) { this._.args = args });
+
+    Timer.prototype.__defineGetter__('args', function () { return this._.args; });
+
     function end() {
         clear.call(this)
         this._.status = 'stopped'
-        trigger.call(this, 'onend', ...this._.args)
+        trigger.call(this, 'onend', this._.args)
     }
 
     function trigger(event) {

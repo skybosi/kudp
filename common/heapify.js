@@ -210,6 +210,22 @@
             }
             return `[${result.join(" ")}]`;
         }
+
+        static testHeapify() {
+            let h = new Heapify(10);
+            h.push("d-1", 1);
+            h.push("d-5", 5);
+            h.push("d-4", 4);
+            h.push("d-2", 2);
+            h.push("d-8", 8);
+            h.push("d-7", 7);
+            h.push("d-6", 6);
+            h.push("d-3", 3);
+            let e = null;
+            while (e = h.pop()) {
+                console.log(e);
+            }
+        }
     }
 
     return Heapify
