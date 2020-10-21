@@ -154,6 +154,14 @@
       return iter;
     }
     // returns null if tree is empty
+    root() {
+      return this._root;
+    }
+    // returns 0 if tree is empty
+    size() {
+      return this.size;
+    }
+    // returns null if tree is empty
     min() {
       var res = this._root;
       if (res === null) {
@@ -566,12 +574,12 @@
       if (!this._comparator) {
         this._comparator = gen_comparator(data)
       }
-      var ret = false;
+      var ret = null;
 
       if (this._root === null) {
         // empty tree
         this._root = new rbNode(data, other);
-        ret = true;
+        ret = this._root;
         this.size++;
       } else {
         var head = new rbNode(undefined); // fake tree root
@@ -593,7 +601,7 @@
             // insert new node at the bottom
             node = new rbNode(data, other);
             p.set_child(dir, node);
-            ret = true;
+            ret = node;
             this.size++;
           } else if (is_red(node.left) && is_red(node.right)) {
             // color flip
@@ -618,10 +626,10 @@
           // stop if found
           if (cmp === 0) {
             if (true == flag) {
-              ret = true;
               node.data = data;
               node.other = other;
             }
+            ret = node;
             break;
           }
 

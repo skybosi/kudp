@@ -253,6 +253,21 @@ const shuffle = (arr) => {
   return arr;
 }
 
+//  随机灰度
+const random_gray = (arr, percent) => {
+  let n = arr.length, random;
+  let parr = [];
+  while (0 != n) {
+    if (parr.length / arr.length < percent) {
+      random = (Math.random() * n--) >>> 0; // 无符号右移位运算符向下取整
+      parr.push(arr[random]);
+    } else {
+      break;
+    }
+  }
+  return arr;
+}
+
 // 生成指定范围内的数组
 const range = (start, end) => {
   var length = end - start;
@@ -301,6 +316,7 @@ module.exports = {
   NewAb2Str: newAb2Str,
   RandomNum: randomNum,
   FormatTime: formatTime,
+  RandomGray: random_gray,
   GetTimestamp: getTimestamp,
   PushS: pushAtSortPosition,
 }
