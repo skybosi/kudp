@@ -831,14 +831,16 @@
    *
    * - timers: 接收器级别，用来记录每一个数据包的超时时的释放工作，已经重复时的定时器重置工作，避免重复接收时鉴别
    * - staging: 接收器级别，用来记录所有没有收到 BEGIN 数据包的数据包，暂存起来等待首个数据包，TODO：是一个恶意攻击点
-   * - upcb：数据块级别，用来数据包接收器处理已经就绪的数据包时的上报回调，TODO：怎么分离出不同的数据块
-   * - doackcb：数据块级别，在接收到数据包后，需要做出的响应动作，比如向发送发恢复ACK，TODO：同上
-   * - ackcb: 数据块级别，在接收到ACK类型的数据包时的回调，TODO：同上
-   * - donecb: 数据块级别，数据包接收完成回调，TODO：同上
+   * - onUp: 数据块级别，用来数据包接收器处理已经就绪的数据包时的上报回调，TODO：怎么分离出不同的数据块
+   * - onEcho: 数据块级别，在接收到数据包后，需要做出的响应动作，比如向发送发恢复ACK，TODO：同上
+   * - onTick: 数据块级别，在接收到数据包时的回调，主要用来方便统计，TODO：同上
+   * - onAck: 数据块级别，在接收到ACK类型的数据包时的回调，TODO：同上
+   * - onDone: 数据块级别，数据包接收完成回调，TODO：同上
    * - queue：接收器级别，管理所有的数据块的接收队列
    *   - seq 一次数据块传输的首个序号
    *   - peer 是发送端信息
-   *   - L 数据包最大序号 last
+   *   - M 数据包最大序号 Max
+   *   - L 数据包理论最大序号, 超过将回滚循环使用 last
    *   - P 待上报的最小seq, pointer
    *   - Q 数据块级别，记录已经收到的数据，按seq的优先队列，该队列（优先队列PQ）是处理本数据块的所有seq，注意与 queue 的区别
    *   - T 数据包类型 type
@@ -857,10 +859,11 @@
     }
 
     defaultOptions = {
-      upcb: this._upcb,         // 上报上层回调
-      doackcb: this._doackcb,   // 接收到消息后，回复ack
-      ackcb: this._ackcb,       // 接收到Ack类型数据包回调
-      donecb: this._donecb,     // 数据包接收完成回调
+      onUp: () => { console.log("onUp callback: ", arguments) },        // 上报上层回调
+      onEcho: () => { /*console.log("onEcho callback: ", arguments);*/ },    // 接收到消息后，回复ack
+      onAck: () => { console.log("onAck callback: ", arguments); },     // 接收到Ack类型数据包回调
+      onDone: () => { console.log("onDone callback: ", arguments); },   // 数据包接收完成回调
+      onTick: null,
     }
 
     // 初始化cb options
@@ -875,40 +878,22 @@
       return this
     }
 
-    // 上报上层回调
-    _upcb() {
-      console.log("上报(upcb)回调: ", arguments);
-    }
-
-    // 接收到消息后，发送ack
-    _doackcb() {
-      console.log("Ack(doackcb)回调: ", arguments);
-    }
-
-    // 接收到Ack类型数据包回调
-    _ackcb() {
-      console.log("一次上报后释放(ackcb)回调: ", arguments);
-    }
-
-    // 数据包接收完成回调
-    _donecb() {
-      console.log("Testing 数据包接收完成回调(donecb)回调: ", arguments);
-    }
-
     // 接收到数据
-    onMessage(mtype, seq, peerInfo, payload, rangesize, version) {
+    onMessage(res) {
+      let { mtype, seq, peerInfo, payload, rangesize, version } = this.decode(res.remoteInfo, res.message);
       if (mtype < ABROAD) {
         this.push(mtype, seq, peerInfo, payload, rangesize, version);
       } else {
         this.shift(mtype, seq, peerInfo, payload);
       }
+      (typeof this.onTick === "function") && this.onTick(mtype, 0);
     }
 
     // 接收方：处理来自网络的数据包 推送一个接收到的数据到接收队列，
     push(mtype, seq, peerInfo, payload, rangesize, version) {
       // 发送ack数据包
       // console.log("Push seq:", seq, payload);
-      this.doackcb(peerInfo.address, peerInfo.port, mtype, seq);
+      this.onEcho(peerInfo.address, peerInfo.port, mtype, seq);
       let data = { seq: seq, message: payload, IPinfo: peerInfo, iPint: peerInfo.ipint, };
       switch (mtype) {
         case DOING:
@@ -929,11 +914,11 @@
           break;
         case BROAD:
           data.type = 'BROAD';
-          this.upcb(mtype, seq, peerInfo, payload);
+          this.onUp(mtype, seq, peerInfo, payload);
           break;
         case MULTI:
           data.type = 'MULTI';
-          this.upcb(mtype, seq, peerInfo, payload);
+          this.onUp(mtype, seq, peerInfo, payload);
           break;
         default:
           break;
@@ -962,7 +947,7 @@
         default:
           break;
       }
-      this.ackcb(mtype, seq, peerInfo, payload)
+      this.onAck(mtype, seq, peerInfo, payload)
     }
 
     /**
@@ -988,7 +973,8 @@
       let node = {
         seq: isn,                  // node.seq 是isn
         peer: peerInfo,            // node.peer 是发送端信息
-        L: isn + rangesize,        // node.L 数据包最大序号
+        L: isn + rangesize,        // node.L 理论数据包最大序号
+        M: isn + rangesize,        // node.M 数据包最大序号
         P: isn,                    // node.P 待上报的最小seq
         Q: new heapify(rangesize), // node.Q 记录已经收到的数据，按seq的PQ
         T: BEGIN, V: version       // node.T node.V 数据包类型及协议版本
@@ -1006,9 +992,13 @@
       // 检测所有暂存区中已有的seq
       for (var seq in this.staging) {
         let seq_data = this.staging[seq];
+        let mtype = seq_data[0];
         let seq1 = seq_data[1];
         let peer2 = seq_data[2];
         let payload3 = seq_data[3];
+        // 记录最大seq
+        if (DONED === mtype)
+          curnode.data['M'] = seq;
         if (peer2.address === peerInfo.address && peer2.port === peerInfo.port &&  // 必须是同一个ip:port
           seq1 >= node.seq && seq1 < node.L) {
           this.addSeqQueue(node, seq1, payload3);
@@ -1021,17 +1011,17 @@
     // 处理 BDD 数据，直接上报
     bdd(isn, peerInfo, payload, rangesize, version) {
       this.queue.insert({ seq: isn, peer: peerInfo, L: isn + rangesize, Q: [{ [isn]: payload }], T: BDD, V: version })
-      this.upcb(BDD, isn, peerInfo, payload);
+      this.onUp(BDD, isn, peerInfo, payload);
     }
 
     /**
      * 检测数据队列中的内容是否可以上报
      * 触发可能上报的时机:
      *   1. Q中累积的数据包超过 UPCD_SIZE
-     *   2. L - P <=  UPCD_SIZE, 即 数据快接收到尾声
+     *   2. M - P <=  UPCD_SIZE, 即 数据快接收到尾声
      *
      * 如下示意图：
-     *    P   ->     ->     ->     ->     ->     -> P L
+     *    P   ->     ->     ->     ->     ->     -> P M
      *  |------|------|------|------|------|------|----
      *  o      ^      ^      ^      ^      ^      ^   e
      *
@@ -1049,7 +1039,7 @@
         return;
       }
       let Q = node['Q'];
-      let delta = node['L'] - node['P'];
+      let delta = node['M'] - node['P'];
       if (Q && (Q.size >= Recver.UPCD_SIZE || delta < Recver.UPCD_SIZE)) {
         let i = 0;
         // TODO, 数据组装
@@ -1065,13 +1055,13 @@
           payloads = (null === payloads) ? pld : Messge.mergeArrayBuffer(payloads, pld);
           node['P']++;
         }
-        payloads && this.upcb(node['T'], node['P'], node['peer'], payloads);
+        payloads && this.onUp(node['T'], node['P'], node['peer'], payloads);
         payloads && console.log(Messge.ab2str(payloads));
       }
       // 表示数据包已经接受完毕, 设置定时器释放可能没有释放queue
-      if (node['L'] <= node['P']) {
+      if (node['M'] <= node['P']) {
         node['_'].other.done = 1; // 当前数据块，接收数据已经
-        this.donecb(node['seq'], node['peer']);
+        this.onDone(node['seq'], node['peer']);
         /**
          * TODO：释放接收器queue的时机
          * 1. 过早的释放导致重复的seq无法处理
@@ -1099,6 +1089,9 @@
         if (curnode) {
           // 接收到的数据seq，小于下一个需要的seq，表明重试数据seq
           if (curnode.data) {
+            // 记录最大seq
+            if (DONED === mtype)
+              curnode.data['M'] = seq;
             if (curnode.data['P'] > seq) {
               curnode.other.stat++;
             } else {
@@ -1162,14 +1155,28 @@
       }
     }
 
+    // 解析从外界收到的数据包
+    decode(peer, buffer) {
+      let pkg = Package.unpack(buffer);
+      let payload = pkg.payload, mtype = pkg.header.Type(), seq = pkg.seq;
+      // ip对应的数字
+      peer.ipint = utils.Ip2Int(peer.address);
+      // 来自ip的序号位seq的数据包。唯一标识
+      peer.ipseq = peer.ipint + SEP + seq;
+      return {
+        mtype: mtype, seq: seq, peerInfo: (peer || {}), payload: payload,
+        rangesize: pkg.rangesize, version: pkg.version
+      }
+    }
+
     // Test
     static testRecver() {
       let rQueue = new Recver();
-      let concurrency = 10; // 支持同时发送数据内容个数
-      let peerInfo = { address: "test-ip-address", port: 5328 };
+      let concurrency = 1; // 支持同时发送数据内容个数
+      let peerInfo = { address: "127.0.0.1", port: 5328 };
       // 新建一个测试任务表
       const t = new task(concurrency, () => {
-        console.log(rQueue, 'All task done!');
+        // console.log(rQueue, 'All task done!');
       });
 
       // 测试任务函数, 模拟 BEGIN/DOING/DONED 数据包
@@ -1191,8 +1198,11 @@
           }
         }
         let payload = "Testing" + SEP + HeaderType[mtype] + SEP + seq;
-        payload = Messge.str2ab(payload);
-        rQueue.onMessage(mtype, seq, peerInfo, payload, rangesize, VERSION);
+        // payload = Messge.str2ab(payload);
+        let pkg = { seq: seq, size: payload.length, type: mtype, payload: payload, factor: rangesize }
+        let pack = new Package(mtype, 0, 0, 0, pkg);
+        rQueue.onMessage({ remoteInfo: peerInfo, message: pack.buffer });
+
         switch (mtype) {
           case BDD:
             console.log("Tested" + SEP + HeaderType[mtype] + SEP + seq);
@@ -1243,10 +1253,11 @@
       this.seqer = new SeqManage();
       this.recver = {}
       this.rQueue = new Recver({
-        upcb: this._handleOnMessage.bind(this),
-        doackcb: this._sendAck.bind(this),
-        ackcb: this._handleAckMessage.bind(this),
-        donecb: null
+        onUp: this._handleOnMessage.bind(this),
+        onEcho: this._sendAck.bind(this),
+        onAck: this._handleAckMessage.bind(this),
+        onTick: this.recvStat.bind(this),
+        onDone: null
       });
       this.stat = new Stat();
       // 获取随机分配的设备id，用于唯一标识
@@ -1286,11 +1297,32 @@
 
     // 接受数据时的回调
     _onMessageHandler(res) {
-      let { mtype, seq, peerInfo, payload, rangesize, version } = this._decode(res.remoteInfo, res.message);
-      this.rQueue.onMessage(mtype, seq, peerInfo, payload, rangesize, version);
+      this.rQueue.onMessage(res);
     }
 
     // 消息处理方法
+
+    // 接收消息的统计
+    recvStat(mtype, err) {
+      // STAT 统计接收数据包个数，错误数据包个数, 比如checksum error
+      (0 === err) ? this.stat.incr('rpgc') : this.stat.incr('erpgc');
+      mtype >= ABROAD && this.stat.incr('rackpgc');  // 确认包
+      mtype === BDD && this.stat.incr('rspgc');      // STAT 统计接收小型数据包个数
+      mtype <= DONED && this.stat.incr('rnspgc');    // STAT 统计接收非小型数据包个数
+      mtype === BROAD && this.stat.incr('rnspgc');   // TODO: 广播 暂时当作非小型数据包
+      mtype === MULTI && this.stat.incr('rnspgc');   // TODO: 组播 暂时当作非小型数据包
+      this.event.emit("kudp-stat", this.statist());
+    }
+
+    // 发送消息的统计
+    sendStat(mtype) {
+      this.stat.incr('pgc');// STAT 统计发送数据包个数
+      mtype >= ABROAD && this.stat.incr('ackpgc');  // 确认包
+      mtype === BDD && this.stat.incr('spgc');      // STAT 统计发送小型数据包个数
+      mtype !== BDD && this.stat.incr('nspgc');     // STAT 统计发送非小型数据包个数
+      mtype === BROAD && this.stat.incr('nspgc');   // TODO: 广播 暂时当作非小型数据包
+      mtype === MULTI && this.stat.incr('nspgc');   // TODO: 组播 暂时当作非小型数据包
+    }
 
     // 处理[SYNC数据包]设备上下线，各设备之间数据同步的功能
     _handleSync(data) {
@@ -1436,8 +1468,6 @@
 
     // 根据传输过程和payload调整数据包类型
     _encode(fd, mtype, a_seq, payload, max_size) {
-      // STAT 统计发送数据包个数
-      this.stat.incr('pgc');
       let seq = 0
       let overflow = false;
       let data = this._serialize(payload)
@@ -1448,7 +1478,6 @@
       let size = data.length;
       // 确认包
       if (a_seq !== null) {
-        this.stat.incr('ackpgc');
         let pkg = { seq: a_seq, size: size, type: mtype, payload: data }
         let pack = new Package(mtype, 0, 0, 1, pkg);
         return { seq: a_seq, size: size, type: pack.header.Type(), pack: pack }
@@ -1465,18 +1494,12 @@
             // 消息数据包（小于PACK_SIZE），只用占用一个数据包
             if (!overflow) {
               mtype = BDD;
-              // STAT 统计发送小型数据包个数
-              this.stat.incr('spgc');
             } else {
-              // STAT 统计发送非小型数据包个数
-              this.stat.incr('nspgc');
               mtype = BEGIN;
             }
           } else {
             seq = this.seqer.get(fstat['isn']);
             // 消息数据包（小于PACK_SIZE），只用占用一个数据包
-            // STAT 统计发送非小型数据包个数
-            this.stat.incr('nspgc');
             // size == max_size 传输过程数据包
             // size <  max_size 传输到最后一个数据包
             mtype = (overflow && size == max_size) ? DOING : DONED;
@@ -1484,8 +1507,6 @@
           break;
         case BROAD:
         case MULTI:
-          // TODO: 广播/组播 暂时当作非小型数据包
-          this.stat.incr('nspgc');
           seq = this.seqer.malloc(1);
           fstat['isn'] = seq;
           break;
@@ -1494,33 +1515,8 @@
       }
       let pkg = { seq: seq, size: size, type: mtype, payload: data, factor: this.factor }
       let pack = new Package(mtype, 0, 0, 0, pkg);
+      this.sendStat(mtype);
       return { seq: seq, size: size, type: mtype, pack: pack }
-    }
-
-    _decode(peer, buffer) {
-      let pkg = Package.unpack(buffer);
-      // STAT 统计接收数据包个数，错误数据包个数
-      pkg ? this.stat.incr('rpgc') : this.stat.incr('erpgc');
-      console.log("unpack:", pkg);
-      let payload = pkg.payload, mtype = pkg.header.Type(), seq = pkg.seq;
-      // STAT 统计接收小型数据包个数
-      (mtype === BDD) ? this.stat.incr('rspgc') : null;
-      // STAT 统计接收非小型数据包个数
-      // TODO: 广播/组播 暂时当作非小型数据包
-      // (mtype === BEGIN) ? this.stat.incr('rnspgc') : null;
-      // (mtype === DOING) ? this.stat.incr('rnspgc') : null;
-      (mtype <= DONED) ? this.stat.incr('rnspgc') : null;
-      // STAT 统计接收非小型数据包个数
-      (mtype >= ABROAD) ? this.stat.incr('rackpgc') : null;
-      this.event.emit("kudp-stat", this.statist());
-      // ip对应的数字
-      peer.ipint = utils.Ip2Int(peer.address);
-      // 来自ip的序号位seq的数据包。唯一标识
-      peer.ipseq = peer.ipint + SEP + seq;
-      return {
-        mtype: mtype, seq: seq, peerInfo: (peer || {}), payload: payload,
-        rangesize: pkg.rangesize * this.section, version: pkg.version
-      }
     }
 
     // 由于数据包会再未收到对应ACK包时会重传，针对ACK包无需设置超时重传
