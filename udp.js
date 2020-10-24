@@ -1169,6 +1169,11 @@
       }
     }
 
+    // unserialize the data
+    unserialize(data) {
+      return JSON.parse(data)
+    }
+
     // Test
     static testRecver() {
       let rQueue = new Recver();
@@ -1233,25 +1238,233 @@
     }
   }
 
-  // 基于wx.UDPSocket的基础类
-  class BaseUdper extends UdpBase {
-    constructor(port) {
-      super(port);
-      // 用于udp通信时的事件通知
-      this.$e = event
-      // udp通信绑定的port，默认5328
-      this.bport = port;
-      // 文件描述符表
+  /**
+   * 虚拟连接器，管理和维护 发送 <---> 接收 两端的一次数据块，保证在这次传输过程中的唯一标识的，
+   * 同时管理多个连接之间的传输细节
+   */
+  class Connector {
+    constructor(options) {
+      for (var prop in this.defaultOptions) this[prop] = this.defaultOptions[prop]
       /**
        * 0 1 2 标准输入 标准输出 标准错误
        * 3 广播数据包 占用
        * 4 多播数据包 占用
        * 传输数据从5 开始使用
        */
-      this.fdset = new Fd();
-      this.timer = {}
+      this.coonnset = new Fd();
+    }
+
+    // 新建一次新的传输过程，分配一个唯一的fd
+    open(option) {
+      let fd = this.coonnset.setInfo({
+        option: option,
+        time: utils.GetTimestamp(),
+      });
+      return fd;
+    }
+    // 关闭一次传输, 释放对应的fd
+    close(fd) {
+      this.coonnset.close(fd);
+    }
+    // 通过fd获取对应的信息
+    fstat(fd) {
+      return this.coonnset.getInfo(fd);
+    }
+
+    addInfo(fd, option) {
+      this.coonnset.addInfo(fd, option)
+    }
+  }
+
+  /**
+   * 发送器
+   */
+  class Sender {
+    static prefix = PROTONAME + SEP + VERSION + SEP + 'sender' + SEP;
+    constructor(options) {
+      for (var prop in this.defaultOptions) this[prop] = this.defaultOptions[prop]
+      this.timers = {}
+      this.conn = new Connector();
       this.seqer = new SeqManage();
-      this.recver = {}
+      this.initOptions(options);
+    }
+
+    defaultOptions = {
+      onSend: () => { console.log("onUp callback: ", arguments) },    // 准备发送数据
+      onFree: () => { console.log("onUp onFree: ", arguments) },      // seq被释放
+      onDone: () => { console.log("onDone callback: ", arguments); }, // 数据块发送完成
+      onStat: null
+    }
+
+    // 初始化cb options
+    initOptions(option, value) {
+      if (option && value) this[option] = value
+      if (!value && typeof option === 'object') {
+        for (var prop in option) {
+          if (this.hasOwnProperty(prop))
+            this[prop] = option[prop]
+        }
+      }
+      return this
+    }
+
+    // 新建一次新的传输过程，分配一个唯一的fd
+    open(option) {
+      return this.conn.open(option)
+    }
+    // 关闭一次传输, 释放对应的fd
+    close(fd) {
+      this.conn.close(fd);
+    }
+    // 通过fd获取对应的信息
+    fstat(fd) {
+      return this.conn.fstat(fd);
+    }
+
+    addInfo(fd, option) {
+      this.conn.addInfo(fd, option)
+    }
+
+    // 根据传输过程和payload调整数据包类型
+    encode(fd, mtype, payload, max_size) {
+      let seq = 0
+      let overflow = false;
+      let data = this.serialize(payload)
+      if (data && (data.length > max_size)) {
+        data = data.slice(0, max_size);
+        overflow = true;
+      }
+      let size = data.length;
+      // 数据包
+      let fstat = this.fstat(fd);
+      let isn = fstat.isn
+      switch (mtype) {
+        case BEGIN:
+          // 首个数据包，将申请一个新的isn
+          if (!isn) {
+            seq = this.seqer.malloc(FACTOR * BASE_SECTION);
+            fstat['isn'] = seq;
+            // 消息数据包（小于PACK_SIZE），只用占用一个数据包
+            if (!overflow) {
+              mtype = BDD;
+            } else {
+              mtype = BEGIN;
+            }
+          } else {
+            seq = this.seqer.get(fstat['isn']);
+            // 消息数据包（小于PACK_SIZE），只用占用一个数据包
+            // size == max_size 传输过程数据包
+            // size <  max_size 传输到最后一个数据包
+            mtype = (overflow && size == max_size) ? DOING : DONED;
+          }
+          break;
+        case BROAD:
+        case MULTI:
+          seq = this.seqer.malloc(1);
+          fstat['isn'] = seq;
+          break;
+        default:
+          throw Errors(EHEADERTYPE, "encode package invalid type");
+      }
+      let pkg = { seq: seq, size: size, type: mtype, payload: data, factor: this.factor }
+      let pack = new Package(mtype, 0, 0, 0, pkg);
+      this.onStat(mtype);
+      return { seq: seq, size: size, type: mtype, pack: pack }
+    }
+
+    encodeAck(mtype, seq, payload) {
+      let data = this.serialize(payload)
+      let pkg = { seq: seq, size: data.length, type: mtype, payload: data }
+      let pack = new Package(mtype, 0, 0, 1, pkg);
+      return { seq: seq, size: data.length, type: pack.header.Type(), pack: pack }
+    }
+
+    // 定时器超时重传
+    retry(seq, type, ip, port, pack, ctx) {
+      console.log('retry: ', seq, type, ip, port, pack, ctx)
+      pack.setFlags(1, 0, 0); // 添加dup标志
+      this.onSend(ip, port, pack.buffer);
+      this.timers[Sender.prefix + seq].restart(ACK_TIMEOUT);
+    }
+
+    // 向某个ip:port发送类型mtype的消息data
+    write(fd, ip, port, mtype, payload) {
+      if (mtype < ABROAD) {
+        let PACK_SIZE = utils.IsLanIP(ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
+        // 编码数据包
+        let { seq, size, type, pack } = this.encode(fd, mtype, payload, PACK_SIZE);
+        // TODO: 广播，多播 是否需要重传？
+        (type > MULTI) && this.addSeqTimer(seq, type, ip, port, pack);
+        this.onSend(ip, port, pack.buffer);
+        return size;
+      } else {
+        let { seq, size, type, pack } = this.encodeAck(mtype, payload, '');
+        this.onSend(ip, port, pack.buffer);
+        return size;
+      }
+    }
+
+    // 释放重试定时器, 释放seq段
+    free(seq, mtype) {
+      // 删除发送窗口中的分配的序号
+      if (this.seqer.location(seq)) {
+        if (ABDD === mtype || ADONED === mtype) {
+          this.seqer.free(seq);
+        } else {
+          this.seqer.del(seq);
+        }
+        mtype > AMULTI &&
+          this.timers[Sender.prefix + seq].stop() &&
+          delete this.timers[Sender.prefix + seq];
+      }
+    }
+
+    // 添加seq 重试定时器
+    addSeqTimer(seq, type, ip, port, pack) {
+      let seqTimer = new timer({
+        onend: (args) => { this.retry(...args); },
+        onstop: (args) => { console.log("onstop: ", args); }
+      }, [seq, type, ip, port, pack, this]);
+      // 记录下每个数据包的定时器，在必要的时候重置定时器
+      this.timers[Sender.prefix + seq] = seqTimer;
+      seqTimer.start(ACK_TIMEOUT);
+    }
+
+    // serialize the data
+    serialize(data) {
+      let type = utils.Type(data);
+      switch (type) {
+        case "Number":
+          return data;
+        case "String":
+          return data;
+        case "Array":
+        case "Object":
+          return JSON.stringify(data)
+        case "Boolean":
+          return (data === true) ? 1 : 0;
+        case "Undefined":
+        case "Null":
+          return '';
+        default:
+          return '';
+      }
+    }
+
+  }
+
+  // 基于wx.UDPSocket的基础类
+  class BaseUdper extends UdpBase {
+    constructor(port) {
+      super(port);
+      this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
+      this.$e = event;          // 用于udp通信时的事件通知
+      this.bport = port;        // udp通信绑定的port，默认5328
+      this.stat = new Stat();   // 统计分析模块
+      this.sQueue = new Sender({
+        onSend: this._send.bind(this),
+        onStat: this.sendStat.bind(this),
+      })
       this.rQueue = new Recver({
         onUp: this._handleOnMessage.bind(this),
         onEcho: this._sendAck.bind(this),
@@ -1259,9 +1472,6 @@
         onTick: this.recvStat.bind(this),
         onDone: null
       });
-      this.stat = new Stat();
-      // 获取随机分配的设备id，用于唯一标识
-      this.id = this.getId();
     }
 
     // 获取分配的随机id
@@ -1407,19 +1617,7 @@
         default:
           break;
       }
-      // 删除发送窗口中的分配的序号
-      if (this.seqer.location(seq)) {
-        if (BDD === mtype || DONED === mtype) {
-          this.seqer.free(seq);
-        } else {
-          this.seqer.del(seq);
-        }
-      }
-      // 释放接收窗口中的来自指定peer的序号
-      delete this.recver[peerInfo.ipseq];
-      // 通知超时定时器删除超时动作
-      data.type = HeaderType[mtype];
-      this.$e.emit(peerInfo.ipseq, data);
+      this.sQueue.free(seq, mtype);
     }
 
     // 处理来自网络的数据包
@@ -1466,170 +1664,9 @@
       console.info("current", this);
     }
 
-    // 根据传输过程和payload调整数据包类型
-    _encode(fd, mtype, a_seq, payload, max_size) {
-      let seq = 0
-      let overflow = false;
-      let data = this._serialize(payload)
-      if (data && (data.length > max_size)) {
-        data = data.slice(0, max_size);
-        overflow = true;
-      }
-      let size = data.length;
-      // 确认包
-      if (a_seq !== null) {
-        let pkg = { seq: a_seq, size: size, type: mtype, payload: data }
-        let pack = new Package(mtype, 0, 0, 1, pkg);
-        return { seq: a_seq, size: size, type: pack.header.Type(), pack: pack }
-      }
-      // 数据包
-      let fstat = this.fstat(fd)
-      let isn = fstat.isn
-      switch (mtype) {
-        case BEGIN:
-          // 首个数据包，将申请一个新的isn
-          if (!isn) {
-            seq = this.seqer.malloc(this._getFactor() * this._getSection());
-            fstat['isn'] = seq;
-            // 消息数据包（小于PACK_SIZE），只用占用一个数据包
-            if (!overflow) {
-              mtype = BDD;
-            } else {
-              mtype = BEGIN;
-            }
-          } else {
-            seq = this.seqer.get(fstat['isn']);
-            // 消息数据包（小于PACK_SIZE），只用占用一个数据包
-            // size == max_size 传输过程数据包
-            // size <  max_size 传输到最后一个数据包
-            mtype = (overflow && size == max_size) ? DOING : DONED;
-          }
-          break;
-        case BROAD:
-        case MULTI:
-          seq = this.seqer.malloc(1);
-          fstat['isn'] = seq;
-          break;
-        default:
-          throw Errors(EHEADERTYPE, "encode package invalid type");
-      }
-      let pkg = { seq: seq, size: size, type: mtype, payload: data, factor: this.factor }
-      let pack = new Package(mtype, 0, 0, 0, pkg);
-      this.sendStat(mtype);
-      return { seq: seq, size: size, type: mtype, pack: pack }
-    }
-
     // 由于数据包会再未收到对应ACK包时会重传，针对ACK包无需设置超时重传
     _sendAck(ip, port, mtype, a_seq) {
-      let self = this;
-      return new Promise((resolver, reject) => {
-        try {
-          // 编码数据包
-          let { seq, size, type, pack } = self._encode(null, mtype, a_seq, '', null);
-          // 调用发送
-          self._send(ip, port, pack.buffer)
-          resolver({ err: 'ok', size: size, seq: seq, type: type, peerIp: ip, peerPort: port });
-        } catch (e) {
-          reject(e);
-        }
-      });
-    }
-
-    // 定时器超时重传
-    _retry(seq, type, ip, port, pack) {
-      let self = this;
-      let event_id = utils.Ip2Int(ip) + SEP + seq;
-      // 设置超时定时器
-      let intervalID = setInterval(function () {
-        console.log('retry...', type, ip, port, pack)
-        // STAT 统计接重复发送数据包个数
-        if (self.stat.incr('dup') < RETRY) {
-          // 添加dup标志
-          pack.setFlags(1, 0, 0);
-          self.stat.incr('pgc');
-          // STAT 统计接收小型数据包个数(dup)
-          (pack.header.Type() === BDD) ? self.stat.incr('spgc') : null;
-          // STAT 统计接收非小型数据包个数(dup)
-          (pack.header.Type() === BEGIN) ? self.stat.incr('nspgc') : null;
-          self._send(ip, port, pack.buffer)
-        } else {
-          clearInterval(intervalID);
-          delete self.timer[event_id];
-        }
-      }, ACK_TIMEOUT);
-      self.timer[event_id] = { ip: ip, seq: seq, id: intervalID }
-      // 定义事件通知      
-      self.$e.on1(event_id, self, res => {
-        console.log('ack:', res);
-        clearInterval(intervalID);
-        delete self.timer[event_id];
-      });
-    }
-
-    // 向某个ip:port发送类型mtype的消息data
-    _write(fd, ip, port, mtype, payload) {
-      let self = this;
-      let PACK_SIZE = utils.IsLanIP(ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
-      return new Promise((resolver, reject) => {
-        try {
-          // 编码数据包
-          let { seq, size, type, pack } = self._encode(fd, mtype, null, payload, PACK_SIZE);
-          // TODO: 广播，多播 是否需要重传？
-          if (type > MULTI) {
-            self._retry(seq, type, ip, port, pack);
-          }
-          // 调用发送
-          self._send(ip, port, pack.buffer);
-          resolver({ err: 'ok', size: size, seq: seq, type: type, peerIp: ip, peerPort: port });
-        } catch (e) {
-          reject(e);
-        }
-      });
-    }
-
-    // 用户控制传输时的区段
-    _getSection() {
-      this.section = this.section || BASE_SECTION;
-      return this.section;
-    }
-
-    _setSection(section) {
-      this.section = section || BASE_SECTION;
-    }
-
-    _getFactor() {
-      this.factor = this.factor || FACTOR;
-      return this.factor;
-    }
-
-    _setFactor(factor) {
-      this.factor = factor || FACTOR;
-    }
-
-    // 数据处理工具
-    // serialize the data
-    _serialize(data) {
-      let type = utils.Type(data);
-      switch (type) {
-        case "Number":
-          return data;
-        case "String":
-          return data;
-        case "Array":
-        case "Object":
-          return JSON.stringify(data)
-        case "Boolean":
-          return (data === true) ? 1 : 0;
-        case "Undefined":
-        case "Null":
-          return '';
-        default:
-          return '';
-      }
-    }
-    // unserialize the data
-    _unserialize(data) {
-      return JSON.parse(data)
+      return this.sQueue.write(null, ip, port, mtype | ABROAD, a_seq);
     }
     // 添加上线用户id address port
     _addOnline(id, address, port) {
@@ -1703,7 +1740,7 @@
     sync(id, payload) {
       let info = (this.getOthers(id) || [])[0];
       if (info) {
-        return this._write(FD_BROAD, info.address, info.port, BROAD, payload);
+        return this.sQueue.write(FD_BROAD, info.address, info.port, BROAD, payload);
       }
     }
 
@@ -1711,22 +1748,13 @@
 
     // 新建一次新的传输过程，分配一个唯一的fd
     open(ip, port, flag) {
-      let fd = this.fdset.setInfo({
-        ip: ip,
-        port: port,
-        flag: flag || BEGIN,
-        time: utils.GetTimestamp(),
-      });
-      return fd;
+      return this.sQueue.open(ip, port, flag);
     }
     // 关闭一次传输, 释放对应的fd
     close(fd) {
-      this.fdset.close(fd);
+      this.sQueue.close(fd);
     }
-    // 通过fd获取对应的信息
-    fstat(fd) {
-      return this.fdset.getInfo(fd);
-    }
+
     // 基础网络方法
 
     // 通过id发送mtype消息的数据data
@@ -1738,56 +1766,15 @@
       } else {
         info = self.getOthers(id) || [];
       }
-      self.fdset.addInfo(fd, { ip: info[0].address, port: info[0].port })
+      this.sQueue.addInfo(fd, { ip: info[0].address, port: info[0].port })
       return Promise.all(info.map((item) => {
-        return self._write(fd, item.address, item.port, BEGIN, payload);
+        return self.sQueue.write(fd, item.address, item.port, BEGIN, payload);
       }));
-    }
-
-    // 接收到kudp的数据
-    recvFrom(fd, mtype, seq, peerInfo, message) {
-      if (!this.recver[peerInfo.ipseq]) {
-        switch (mtype) {
-          case BROAD:
-            data.type = 'BROAD';
-            this._handleSync(data);
-            break;
-          case MULTI:
-            data.type = 'MULTI';
-            this._handleMulti(data);
-            break;
-          case BEGIN:
-            data.type = 'BEGIN';
-            this.event.emit("onMessage", data);
-            break;
-          case DOING:
-            data.type = 'DOING';
-            this.event.emit("onMessage", data);
-            break;
-          case DONED:
-            data.type = 'DONED';
-            this.event.emit("onMessage", data);
-            break;
-          case BDD:
-            data.type = 'BDD';
-            this.event.emit("onMessage", data);
-            break;
-          default:
-            data.type = mtype;
-            this.event.emit("onMessage", data);
-            break;
-        }
-        this.recver[peerInfo.ipseq] = data
-        // console.info("seqer:", this.seqer, seq, mtype);
-        // this.seqer.free(seq);
-      }
-      console.info("online", this.online);
-      console.info("current", this);
     }
 
     // 广播数据包
     broadcast(payload) {
-      return this._write(FD_BROAD, BROADWAY, this.bport, BROAD, payload || "");
+      return this.sQueue.write(FD_BROAD, BROADWAY, this.bport, BROAD, payload || "");
     }
 
     /**
@@ -1799,7 +1786,7 @@
      */
     // TODO: 组播多播数据包
     multicast(payload, multiway) {
-      return this._write(FD_MULTI, multiway, this.bport, MULTI, payload || "");
+      return this.sQueue.write(FD_MULTI, multiway, this.bport, MULTI, payload || "");
     }
 
     // 工具方法
