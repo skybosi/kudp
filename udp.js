@@ -63,7 +63,7 @@
   const BASE_SECTION = 256 // 基础段长度
 
   // 重传机制超时时间
-  const ACK_TIMEOUT = 400
+  const ACK_TIMEOUT = 40
   // 局域网最大数据包大小
   const LAN_PACK_SIZE = 1024
   // 广域网最大数据包大小
@@ -123,17 +123,15 @@
         this.data[this.isn] = {};
         // 待确认的seq
         this.data[this.isn]['ack'] = [this.isn];
-        if (size > 1) {
-          // this.data[this.isn]['index'] = index;
-          // seq区段大小
-          this.data[this.isn]['length'] = size;
-          // isn段的起始
-          this.data[this.isn]['isn'] = this.isn
-          // 最后一个seq的前一个，(左闭右开]
-          this.data[this.isn]['last'] = this.isn + size;
-          // 下一个可以使用的seq
-          this.data[this.isn]['cursor'] = this.isn + 1;
-        }
+        // this.data[this.isn]['index'] = index;
+        // seq区段大小
+        this.data[this.isn]['length'] = size;
+        // isn段的起始
+        this.data[this.isn]['isn'] = this.isn
+        // 最后一个seq的前一个，(左闭右开]
+        this.data[this.isn]['last'] = this.isn + size;
+        // 下一个可以使用的seq
+        this.data[this.isn]['cursor'] = this.isn + 1;
       } else {
         throw Errors(ENOTALLOCISN, "malloc seq error");
       }
@@ -235,7 +233,10 @@
     get(isn, loop) {
       // 返回可用的最新的seq，然后自增
       if (isn > -1 && this.data[isn]['cursor']) {
-        let seq = this.data[isn]['cursor']++ % (loop ? this.data[isn]['length'] : 1)
+        let seq = this.data[isn]['cursor']++;
+        if (loop && this.data[isn]['cursor'] >= this.data[isn]['length']) {
+          seq = seq % this.data[isn]['length'];
+        }
         // 写入一个待确认的seq
         this.data[isn]['ack'].push(seq)
         return seq
@@ -247,13 +248,13 @@
      * 从一个isn, 删除已确认的数据包seq 
      * @param {number} seq 待删除的业务层确认的序号
      */
-    del(seq) {
-      let isn = this.location(seq);
-      let isn_info = this.data[isn] || { ack: [] }
+    del(seq, isn) {
+      let _isn = isn || this.location(seq);
+      let isn_info = this.data[_isn] || { ack: [] }
       if (isn_info['length']) {
         let index = isn_info['ack'].indexOf(seq);
         if (index >= 0) {
-          this.data[isn]['ack'].splice(index, 1)
+          this.data[_isn]['ack'].splice(index, 1);
         }
       } else {
         this.free(seq);
@@ -809,8 +810,7 @@
         self._onMessageHandler(res);
       });
     }
-    // 私有方法
-    _send(ip, port, msg) {
+    send(ip, port, msg) {
       return this.kudper.send({ address: ip, port: port, message: msg });
     }
   }
@@ -1243,8 +1243,7 @@
    * 同时管理多个连接之间的传输细节
    */
   class Connector {
-    constructor(options) {
-      for (var prop in this.defaultOptions) this[prop] = this.defaultOptions[prop]
+    constructor() {
       /**
        * 0 1 2 标准输入 标准输出 标准错误
        * 3 广播数据包 占用
@@ -1293,7 +1292,7 @@
       onSend: () => { console.log("onUp callback: ", arguments) },    // 准备发送数据
       onFree: () => { console.log("onUp onFree: ", arguments) },      // seq被释放
       onDone: () => { console.log("onDone callback: ", arguments); }, // 数据块发送完成
-      onStat: null
+      repeat: 10,
     }
 
     // 初始化cb options
@@ -1312,63 +1311,70 @@
     open(option) {
       return this.conn.open(option)
     }
+
     // 关闭一次传输, 释放对应的fd
     close(fd) {
       this.conn.close(fd);
     }
+
     // 通过fd获取对应的信息
     fstat(fd) {
       return this.conn.fstat(fd);
     }
 
+    // 补充fd信息
     addInfo(fd, option) {
       this.conn.addInfo(fd, option)
     }
 
     // 根据传输过程和payload调整数据包类型
     encode(fd, mtype, payload, max_size) {
-      let seq = 0
-      let overflow = false;
+      let seq = 0, overflow = false;
       let data = this.serialize(payload)
-      if (data && (data.length > max_size)) {
-        data = data.slice(0, max_size);
+      if (data && data.length > max_size) {
         overflow = true;
+        data = data.slice(0, max_size);
       }
       let size = data.length;
-      // 数据包
       let fstat = this.fstat(fd);
-      let isn = fstat.isn
+      if (!fstat)
+        throw Errors(EBADFD, "bad or empty fd", fd);
+
+      // 根据数据类型，改写mtype
+      if (mtype === BEGIN) {
+        // 首个数据包，将申请一个新的isn
+        if (fstat && !fstat.isn) {
+          /**
+           * 消息数据包（小于PACK_SIZE），只用占用一个数据包, 即 BDD
+           * 否则为 BEGIN， 标记一个数据块的其实数据包。
+           */
+          mtype = overflow ? BEGIN : BDD;
+        } else {
+          /**
+           * size == max_size 传输过程数据包
+           * size <  max_size 传输到最后一个数据包
+           */
+          mtype = (overflow && size == max_size) ? DOING : DONED;
+        }
+      }
+      // 根据数据包类型，分配seq
       switch (mtype) {
         case BEGIN:
-          // 首个数据包，将申请一个新的isn
-          if (!isn) {
-            seq = this.seqer.malloc(FACTOR * BASE_SECTION);
-            fstat['isn'] = seq;
-            // 消息数据包（小于PACK_SIZE），只用占用一个数据包
-            if (!overflow) {
-              mtype = BDD;
-            } else {
-              mtype = BEGIN;
-            }
-          } else {
-            seq = this.seqer.get(fstat['isn']);
-            // 消息数据包（小于PACK_SIZE），只用占用一个数据包
-            // size == max_size 传输过程数据包
-            // size <  max_size 传输到最后一个数据包
-            mtype = (overflow && size == max_size) ? DOING : DONED;
-          }
+          seq = this.seqer.malloc(FACTOR * BASE_SECTION);
+          fstat['isn'] = seq;
           break;
-        case BROAD:
-        case MULTI:
+        case BDD: case BROAD: case MULTI:
           seq = this.seqer.malloc(1);
           fstat['isn'] = seq;
           break;
+        case DOING: case DONED:
+          seq = this.seqer.get(fstat['isn']);
+          break;
         default:
-          throw Errors(EHEADERTYPE, "encode package invalid type");
+          throw Errors(EHEADERTYPE, "invalid type", type);
       }
-      let pkg = { seq: seq, size: size, type: mtype, payload: data, factor: this.factor }
+      let pkg = { seq: seq, size: size, type: mtype, payload: data, factor: FACTOR }
       let pack = new Package(mtype, 0, 0, 0, pkg);
-      this.onStat(mtype);
       return { seq: seq, size: size, type: mtype, pack: pack }
     }
 
@@ -1380,42 +1386,53 @@
     }
 
     // 定时器超时重传
-    retry(seq, type, ip, port, pack, ctx) {
-      console.log('retry: ', seq, type, ip, port, pack, ctx)
+    retry(seq, mtype, ip, port, pack, ctx) {
+      console.log('retry: ', seq, mtype, ip, port, pack, ctx)
       pack.setFlags(1, 0, 0); // 添加dup标志
-      this.onSend(ip, port, pack.buffer);
-      this.timers[Sender.prefix + seq].restart(ACK_TIMEOUT);
+      this.onSend(mtype, ip, port, pack.buffer, 1);
+      // 防止死循环，导致无限重试
+      this.timers[Sender.prefix + seq].repeat < this.repeat &&
+        this.timers[Sender.prefix + seq].restart(ACK_TIMEOUT);
     }
 
     // 向某个ip:port发送类型mtype的消息data
     write(fd, ip, port, mtype, payload) {
-      if (mtype < ABROAD) {
-        let PACK_SIZE = utils.IsLanIP(ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
-        // 编码数据包
-        let { seq, size, type, pack } = this.encode(fd, mtype, payload, PACK_SIZE);
+      return new Promise(resolver => {
+        let body = null;
+        if (mtype < ABROAD) {
+          let PACK_SIZE = utils.IsLanIP(ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
+          body = this.encode(fd, mtype, payload, PACK_SIZE);  // 编码数据包
+        } else {
+          body = this.encodeAck(mtype, payload, '');          // 编码数据包ACK
+        }
+        let { seq, size, type, pack } = body;
+        this.onSend(mtype, ip, port, pack.buffer);
         // TODO: 广播，多播 是否需要重传？
-        (type > MULTI) && this.addSeqTimer(seq, type, ip, port, pack);
-        this.onSend(ip, port, pack.buffer);
-        return size;
-      } else {
-        let { seq, size, type, pack } = this.encodeAck(mtype, payload, '');
-        this.onSend(ip, port, pack.buffer);
-        return size;
-      }
+        (type > MULTI && type < ABROAD) && this.addSeqTimer(seq, type, ip, port, pack);
+        resolver({ err: 'ok', code: EKUDPOK, size: size, seq: seq, type: type, peerIp: ip, peerPort: port });
+      })
     }
 
-    // 释放重试定时器, 释放seq段
+    // 释放重试定时器, 释放seq段， mtype >= ABOARD
     free(seq, mtype) {
       // 删除发送窗口中的分配的序号
-      if (this.seqer.location(seq)) {
-        if (ABDD === mtype || ADONED === mtype) {
-          this.seqer.free(seq);
+      console.log("free Ack:", seq, mtype)
+      let isn = this.seqer.location(seq)
+      if (isn >= 0) {
+        // 释放seq，BEGIN / DOING 是否中间的seq
+        if (ABEGIN === mtype || ADOING === mtype) {
+          this.seqer.del(seq, isn);
         } else {
-          this.seqer.del(seq);
+          this.seqer.free(seq);
         }
-        mtype > AMULTI &&
-          this.timers[Sender.prefix + seq].stop() &&
+      }
+      // 释放定时器
+      if (mtype > AMULTI) {
+        let seqTimer = this.timers[Sender.prefix + seq];
+        if (seqTimer) {
+          seqTimer.stop();
           delete this.timers[Sender.prefix + seq];
+        }
       }
     }
 
@@ -1450,7 +1467,6 @@
           return '';
       }
     }
-
   }
 
   // 基于wx.UDPSocket的基础类
@@ -1462,8 +1478,7 @@
       this.bport = port;        // udp通信绑定的port，默认5328
       this.stat = new Stat();   // 统计分析模块
       this.sQueue = new Sender({
-        onSend: this._send.bind(this),
-        onStat: this.sendStat.bind(this),
+        onSend: this._onSend.bind(this),
       })
       this.rQueue = new Recver({
         onUp: this._handleOnMessage.bind(this),
@@ -1510,6 +1525,11 @@
       this.rQueue.onMessage(res);
     }
 
+    // 发送数据回调
+    _onSend(mtype, ip, port, message, dup) {
+      this.send(ip, port, message);
+      this.sendStat(mtype, dup);
+    }
     // 消息处理方法
 
     // 接收消息的统计
@@ -1525,13 +1545,14 @@
     }
 
     // 发送消息的统计
-    sendStat(mtype) {
+    sendStat(mtype, dup) {
       this.stat.incr('pgc');// STAT 统计发送数据包个数
       mtype >= ABROAD && this.stat.incr('ackpgc');  // 确认包
       mtype === BDD && this.stat.incr('spgc');      // STAT 统计发送小型数据包个数
       mtype !== BDD && this.stat.incr('nspgc');     // STAT 统计发送非小型数据包个数
       mtype === BROAD && this.stat.incr('nspgc');   // TODO: 广播 暂时当作非小型数据包
       mtype === MULTI && this.stat.incr('nspgc');   // TODO: 组播 暂时当作非小型数据包
+      (1 === dup) && this.stat.incr('dup');         // TODO 重复数据包
     }
 
     // 处理[SYNC数据包]设备上下线，各设备之间数据同步的功能
@@ -1554,9 +1575,7 @@
           break;
       }
       data.online = this.online.length;
-      if (one) {
-        this.event.emit("onMessage", data);
-      }
+      one && this.event.emit("onMessage", data);
       return data;
     }
 
@@ -1571,7 +1590,7 @@
         this.event.emit("onMessage", data);
       } else {
         // 向新上线的用户推送所有在线
-        this.sync(data.message, '+' + this.id);
+        this.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
       }
       return one;
     }
@@ -1588,7 +1607,7 @@
         this.event.emit("onMessage", data);
       } else {
         // 向新上线的用户推送所有在线
-        this.sync(data.peerId, '+' + this.id);
+        this.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
       }
     }
 
@@ -1665,8 +1684,9 @@
     }
 
     // 由于数据包会再未收到对应ACK包时会重传，针对ACK包无需设置超时重传
-    _sendAck(ip, port, mtype, a_seq) {
-      return this.sQueue.write(null, ip, port, mtype | ABROAD, a_seq);
+    _sendAck(ip, port, mtype, seq) {
+      console.log("sendAck:", mtype, seq);
+      return this.sQueue.write(null, ip, port, mtype | ABROAD, seq);
     }
     // 添加上线用户id address port
     _addOnline(id, address, port) {
@@ -1737,14 +1757,9 @@
       }
     }
     // 向某一个设备id发送同步类型的数据，主要是同步本设备的数据更新
-    sync(id, payload) {
-      let info = (this.getOthers(id) || [])[0];
-      if (info) {
-        return this.sQueue.write(FD_BROAD, info.address, info.port, BROAD, payload);
-      }
+    sync(ip, port, payload) {
+      return this.sQueue.write(FD_BROAD, ip, port, BROAD, payload);
     }
-
-    // 传输管理
 
     // 新建一次新的传输过程，分配一个唯一的fd
     open(ip, port, flag) {
@@ -1756,7 +1771,6 @@
     }
 
     // 基础网络方法
-
     // 通过id发送mtype消息的数据data
     sendTo(fd, id, payload) {
       let self = this;
@@ -1778,13 +1792,13 @@
     }
 
     /**
+     * TODO: 组播多播数据包
      * IP多播通信必须依赖于IP多播地址，在IPv4中它是一个D类IP地址，范围从224.0.0.0 ~ 239.255.255.255，
      * 并被划分为局部链接多播地址、预留多播地址和管理权限多播地址三类：
      * 1. 局部链接多播地址: 224.0.0.0 ~ 224.0.0.255，为路由协议和其它用途保留的地址，路由器并不转发属于此范围的IP包；
      * 2. 预留多播地址: 224.0.1.0 ~ 238.255.255.255，可用于全球范围（如Internet）或网络协议；
      * 3. 管理权限多播地址: 239.0.0.0 ~ 239.255.255.255，可供组织内部使用，类似于私有IP地址，不能用于Internet，可限制多播范围。
      */
-    // TODO: 组播多播数据包
     multicast(payload, multiway) {
       return this.sQueue.write(FD_MULTI, multiway, this.bport, MULTI, payload || "");
     }

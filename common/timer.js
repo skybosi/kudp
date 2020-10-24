@@ -30,6 +30,7 @@
             _duration: 0,                                      // timer duration
             status: 'initialized',                             // timer last status
             start: 0,                                          // timer start time
+            repeat: 0,                                         // timer repeat times
             restart: 0,                                        // timer restart time
             measures: [],
             args: args                                         // call env args
@@ -70,6 +71,7 @@
                 trigger.call(this, 'ontick', this.getDuration(), this._.args)
             }.bind(this), ++this._.options.tick * 1 /*+this._.options.tick * 1000*/)
         }
+        this._.repeat++;
         this._.restart = +new Date
         this._.status = 'started' // 'restarted'
         trigger.call(this, 'onrestart', this.getDuration(), this._.args)
@@ -177,6 +179,12 @@
     Timer.prototype.__defineSetter__('args', function (args) { this._.args = args });
 
     Timer.prototype.__defineGetter__('args', function () { return this._.args; });
+
+    Timer.prototype.__defineGetter__('restarted', function () { return this._.restart !== 0; });
+
+    Timer.prototype.__defineGetter__('repeat', function () { return this._.repeat; });
+
+    Timer.prototype.__defineGetter__('status', function () { return this._.status });
 
     function end() {
         clear.call(this)
