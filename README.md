@@ -25,3 +25,7 @@
 5. [timer](https://github.com/husa/timer.js)           用于接收器中的已确认seq的超时管理
 6. [tree](https://github.com/vadimg/js_bintrees)       用于管理接收器中的队列
 
+## TODO
+1. 业务层实现文字传输
+2. 业务层实现文件传输（文本、图片、视频）
+3. 测试task 任务测试业务层，实现多种数据块同时传输
