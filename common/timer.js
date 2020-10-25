@@ -93,7 +93,7 @@
         if (!/started|paused|restarted/.test(this._.status)) return this
         clear.call(this, true)
         this._.status = 'stopped'
-        trigger.call(this, 'onstop', this.getDuration(), this._.args)
+        trigger.call(this, 'onstop', Object.assign((this._.args || {}), { spend: this.spend }))
         return this
     }
 
@@ -185,6 +185,8 @@
     Timer.prototype.__defineGetter__('repeat', function () { return this._.repeat; });
 
     Timer.prototype.__defineGetter__('status', function () { return this._.status });
+
+    Timer.prototype.__defineGetter__('spend', function () { return +new Date - this._.start });
 
     function end() {
         clear.call(this)

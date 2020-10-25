@@ -365,6 +365,22 @@
     set(key, val) {
       return this.props[key] ? this.props[key] = val || 0 : this.props[key] = val || 0;
     }
+    del(key) {
+      delete this.props[key];
+    }
+    get(key) {
+      return this.props[key];
+    }
+    avg(key, val) {
+      if (!this.props[key]) {
+        this.props[key] = 0;
+        this.props[key + "_cnt"] = 1;
+        this.props[key] += ((val || 0) - this.props[key]) / this.props[key + "_cnt"];
+      } else {
+        this.props[key] += ((val || 0) - this.props[key]) / ++this.props[key + "_cnt"];
+        this.props[key] = parseFloat(this.props[key].toFixed(2));
+      }
+    }
   }
 
   var BROADWAY = "255.255.255.255"
@@ -818,7 +834,7 @@
   /**
    * 接收器：
    * 接收到数据包后，做上报业务层管理器
-   * 在一次单项的发送的过程中
+   * 在一次单向的发送 <--> 接收 的过程中
    *  发送方：仅仅只会接收  ABROAD ~ ABDD
    *  接收方：仅仅只会接收  BROAD ~ BDD
    * 对于接收器来说，只会处理接收到的数据包，并对接收到的数据包做一些相应的处理
@@ -871,7 +887,7 @@
       if (option && value) this[option] = value
       if (!value && typeof option === 'object') {
         for (var prop in option) {
-          if (this.hasOwnProperty(prop))
+          if (this.defaultOptions.hasOwnProperty(prop) && this.hasOwnProperty(prop))
             this[prop] = option[prop]
         }
       }
@@ -1277,21 +1293,49 @@
 
   /**
    * 发送器
+   * 业务层调用发送的接口，通过udp发送到对端，必要时做出重试，目的是保证数据可靠到达
+   * 在一次单向的发送 <--> 接收 的过程中
+   * 发送方：仅仅只会发送 BROAD ~ BDD
+   * 接收方：仅仅只会发送 ABROAD ~ ABDD
+   * 对于发送器来说，只会发送数据包，在超时时做出重试，此外是等待ACK，对资源做释放处理，对应的资源有：
+   *   - fd 分配：标记一次传输过程的关联符号，open 创建 close 释放
+   *   - seq 管理器：标记一次传输数据包的唯一标识，在一个数据块内可能在数据包较大时重复，但是在多个数据块之间禁止交叉重复。
+   *   - timer 定时器：超时重试的定时功能，在ack后会被释放
+   *
+   * 概念:
+   * - 数据块级别：表示一次独立的完整传输过程，比如一张图片，一段文本，一个视频，由被分离的数据包组装而成，必须包含 BEGIN -> DOING -> DONED / BDD 的数据包类型
+   * - 发送器级别：一个完整的发送器等级，发送器可以同时支持发送多个不同的独立数据块传输（数据块级别），比如一段文字、一张图片 可以同时传输
+   *
+   * 关键成员功能作用:
+   *
+   * - timers: 发送器级别，管理所有发送的数据包的序号及其重试处理，以确保数据超时重试，且在收到ACK时释放，还有在重试超过某一限制时将会向发送方的业务层抛出错误，对应onError回调
+   * - conn: 发送器/数据块级别，连接器，用于数据块传输过程中的发送方的seq的管理中心，用于标识定位发送的数据包是属于哪个数据块。
+   * - seqer: 发送器级别，seq 管理器，用于在需要的时候分配和生成以及ACK时的释放，是数据块之间分组的核心模块。存在攻击风险。 TODO：优化管理效率，谨防恶意攻击
+   * - stat: 发送器级别，发送的过程中统计信息，用于流控做分析准备，简单的限流工具.
+   * - timeout, delta: 发送器级别，简单的限流工具，通过多次传输过程 send -> ack 之间的耗时均值，加上一个delta，作为后期的timer的timeout。
+   * - repeat: 数据块级别，超时重试次数，超过该次数将会上抛异常回调。
+   * - onSend: 数据块级别，数据包准备好，可以发送时的回调，用于屏蔽具体发送方式，上层觉得操作方法。
+   * - onError: 数据块级别，单次传输超时时的重试次数，超过时将回调该函数，用户方便业务层异常提示，阈值为 repeat
+   * - onDone: 数据块级别，数据块发送完成时的回调。
+   *
    */
   class Sender {
     static prefix = PROTONAME + SEP + VERSION + SEP + 'sender' + SEP;
     constructor(options) {
       for (var prop in this.defaultOptions) this[prop] = this.defaultOptions[prop]
-      this.timers = {}
-      this.conn = new Connector();
-      this.seqer = new SeqManage();
+      this.delta = 5;
+      this.timers = {};               // 重试定时器
+      this.stat = new Stat();         // 统计分析模块
+      this.conn = new Connector();    // 虚拟连接器
+      this.seqer = new SeqManage();   // seq 管理器
       this.initOptions(options);
     }
 
     defaultOptions = {
       onSend: () => { console.log("onUp callback: ", arguments) },    // 准备发送数据
-      onFree: () => { console.log("onUp onFree: ", arguments) },      // seq被释放
+      onError: () => { console.log("onUp onError: ", arguments) },    // 重试次数过多异常
       onDone: () => { console.log("onDone callback: ", arguments); }, // 数据块发送完成
+      timeout: ACK_TIMEOUT,                                           // 重试的超时时间
       repeat: 10,
     }
 
@@ -1300,7 +1344,7 @@
       if (option && value) this[option] = value
       if (!value && typeof option === 'object') {
         for (var prop in option) {
-          if (this.hasOwnProperty(prop))
+          if (this.defaultOptions.hasOwnProperty(prop) && this.hasOwnProperty(prop))
             this[prop] = option[prop]
         }
       }
@@ -1388,33 +1432,43 @@
     // 定时器超时重传
     retry(seq, mtype, ip, port, pack, ctx) {
       console.log('retry: ', seq, mtype, ip, port, pack, ctx)
+      this.stat.incr('retry');
       pack.setFlags(1, 0, 0); // 添加dup标志
       this.onSend(mtype, ip, port, pack.buffer, 1);
       // 防止死循环，导致无限重试
-      this.timers[Sender.prefix + seq].repeat < this.repeat &&
-        this.timers[Sender.prefix + seq].restart(ACK_TIMEOUT);
+      if (this.timers[Sender.prefix + seq].repeat < this.repeat) {
+        this.timers[Sender.prefix + seq].restart(this.timeout);
+      } else {
+        this.onError(seq, mtype, ip, port, pack);
+      }
     }
 
     // 向某个ip:port发送类型mtype的消息data
     write(fd, ip, port, mtype, payload) {
-      return new Promise(resolver => {
-        let body = null;
-        if (mtype < ABROAD) {
-          let PACK_SIZE = utils.IsLanIP(ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
-          body = this.encode(fd, mtype, payload, PACK_SIZE);  // 编码数据包
-        } else {
-          body = this.encodeAck(mtype, payload, '');          // 编码数据包ACK
-        }
-        let { seq, size, type, pack } = body;
-        this.onSend(mtype, ip, port, pack.buffer);
-        // TODO: 广播，多播 是否需要重传？
-        (type > MULTI && type < ABROAD) && this.addSeqTimer(seq, type, ip, port, pack);
-        resolver({ err: 'ok', code: EKUDPOK, size: size, seq: seq, type: type, peerIp: ip, peerPort: port });
-      })
+      let body = null;
+      if (mtype < ABROAD) {
+        let PACK_SIZE = utils.IsLanIP(ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
+        body = this.encode(fd, mtype, payload, PACK_SIZE);  // 编码数据包
+      } else {
+        body = this.encodeAck(mtype, payload, '');          // 编码数据包ACK
+      }
+      let { seq, size, type, pack } = body;
+      this.onSend(mtype, ip, port, pack.buffer);
+      // TODO: 广播，多播 是否需要重传？
+      (type > MULTI && type < ABROAD) && this.addSeqTimer(seq, type, ip, port, pack);
+      return size;
     }
 
     // 释放重试定时器, 释放seq段， mtype >= ABOARD
     free(seq, mtype) {
+      let seqTimer = this.timers[Sender.prefix + seq];
+      // 释放定时器
+      if (mtype > AMULTI) {
+        if (seqTimer) {
+          seqTimer.stop();
+          delete this.timers[Sender.prefix + seq];
+        }
+      }
       // 删除发送窗口中的分配的序号
       console.log("free Ack:", seq, mtype)
       let isn = this.seqer.location(seq)
@@ -1426,25 +1480,34 @@
           this.seqer.free(seq);
         }
       }
-      // 释放定时器
-      if (mtype > AMULTI) {
-        let seqTimer = this.timers[Sender.prefix + seq];
-        if (seqTimer) {
-          seqTimer.stop();
-          delete this.timers[Sender.prefix + seq];
-        }
-      }
     }
 
     // 添加seq 重试定时器
     addSeqTimer(seq, type, ip, port, pack) {
       let seqTimer = new timer({
         onend: (args) => { this.retry(...args); },
-        onstop: (args) => { console.log("onstop: ", args); }
+        onstop: (args) => {
+          this.stat.incr('packcnt');
+          this.stat.avg('spendavg', args.spend);
+          console.log("onstop: ", args.spend, this.timeout, this.stat.get('spendavg'));
+          // 数据包发送超过 this.repeat， 尝试风险timeout
+          if (0 === this.stat.get('packcnt') % this.repeat) {
+            this.timeout = Math.ceil(this.stat.get('spendavg'), this.delta);
+            this.stat.del('spendavg');
+          }
+          // 如果发现超时重传，将扩大增量值为之前的2倍
+          if (this.stat.get('retry')) {
+            this.delta >>= 1;
+          }
+          // 当delta 大于超时值，将恢复到一半
+          if (this.delta > this.timeout) {
+            this.delta <<= 2;
+          }
+        }
       }, [seq, type, ip, port, pack, this]);
       // 记录下每个数据包的定时器，在必要的时候重置定时器
       this.timers[Sender.prefix + seq] = seqTimer;
-      seqTimer.start(ACK_TIMEOUT);
+      seqTimer.start(this.timeout);
     }
 
     // serialize the data
@@ -1469,16 +1532,45 @@
     }
   }
 
-  // 基于wx.UDPSocket的基础类
-  class BaseUdper extends UdpBase {
-    constructor(port) {
+  /**
+   * 本kudp 基于wx.UDPSocket的基础类实现
+   * 基于udp协议实现可靠传输，为更上层应用层提供可靠的"传输层"！
+   * 几个说明
+   *   - 基于udp协议
+   *   - 实现可靠的传输
+   *   - 封装过程不保持长连接
+   *   - 基于数据报而不是字节流
+   *   - 不做拥塞控制，只要设法保证数据不错、不丢、不乱
+   *
+   * 整个实现分 3大模块 1个辅助模块
+   * - 逻辑模块: 管理其他模块的逻辑层，对接udp，负责接收和发送udp数据。对接收到的数据，给接收器处理；对于发送的数据逻辑，交给发送处理；对于传输过程的中的统计类交给统计器
+   * - 发送器: 负责从业务层获取数据，通过逻辑模块的udp封装，发送到网络中；同时要管理连接分配、释放，seq的分配、释放，超时重试机制，发送异常回调。
+   * - 接收器: 负责处理来自逻辑模块从udp封装的接口回调的网络数据，保证在接受到数据块后，第一时间回复ACK，然后定时释放接收到的seq，还有就是上报数据到业务层的逻辑。
+   * - 统计器: 负责在发送和接收到数据后的统计工作，不同类型的数据包统计，最重要的是 dup 值的统计，方便后期流控和网络传输过程的中网络状态统计分析
+   *
+   * 公开接口:
+   *   open: 新建一个虚拟连接标识，该标识只在发送端存在
+   *   close: 关闭open新建的标识，同时释放所有open申请的资源
+   *   write: 通过发送器向网络发送一个数据块
+   *   sync: 通过发送器发送一个特殊数据包
+   *   broadcast: 通过发送器发送一个特殊数据包，广播类型
+   *   multicast: 通过发送器发送一个特殊数据包，多播类型，NOTE: 基于wx.UDPSocket 不支持多播
+   * 公开的业务层回调接口:
+   *   onRead: 从接收器获取到数据后，回调到业务层的接口
+   *   onWrite: 向发送器发送数据后的回调业务层的接口，目前是否无用
+   *   onStat: 统计器向业务层回调的统计数据接口
+   *
+   * 考虑到目前业务支持，目前仅提供以上接口，后期版本申请将会根据需要信息，每一次升级版本，将会更新 VERSION。
+   */
+  class kudp extends UdpBase {
+    constructor(port, options) {
       super(port);
-      this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
-      this.$e = event;          // 用于udp通信时的事件通知
+      for (var prop in this.defaultOptions) this[prop] = this.defaultOptions[prop]
       this.bport = port;        // udp通信绑定的port，默认5328
       this.stat = new Stat();   // 统计分析模块
       this.sQueue = new Sender({
         onSend: this._onSend.bind(this),
+        onError: () => { wx.showToast({ title: '网络有点小问题', icon: 'loading' }); }
       })
       this.rQueue = new Recver({
         onUp: this._handleOnMessage.bind(this),
@@ -1487,25 +1579,26 @@
         onTick: this.recvStat.bind(this),
         onDone: null
       });
+      this.initOptions(options);
+      this._init();
     }
 
-    // 获取分配的随机id
-    getId() {
-      let id = null
-      try {
-        let res = cache.get('LOCAL');
-        if (res) {
-          id = res
-        } else {
-          id = utils.RandomNum(0, IDMAX)
-          cache.set('LOCAL', id, EXPIRE);
+    defaultOptions = {
+      onRead: null,   // 读取到网络上的数据回调
+      onWrite: null,  // 向网络发送数据时回调
+      onStat: null,   // 数据分析统计回调
+    }
+
+    // 初始化cb options
+    initOptions(option, value) {
+      if (option && value) this[option] = value
+      if (!value && typeof option === 'object') {
+        for (var prop in option) {
+          if (this.defaultOptions.hasOwnProperty(prop) && this.hasOwnProperty(prop))
+            this[prop] = option[prop]
         }
-      } catch (e) {
-        id = utils.RandomNum(0, IDMAX)
-        cache.set('LOCAL', id, EXPIRE);
       }
-      id = utils.Pad(id, IDLEN)
-      return id
+      return this
     }
 
     // 初始化udp相关回调
@@ -1527,10 +1620,9 @@
 
     // 发送数据回调
     _onSend(mtype, ip, port, message, dup) {
-      this.send(ip, port, message);
       this.sendStat(mtype, dup);
+      return this.send(ip, port, message);
     }
-    // 消息处理方法
 
     // 接收消息的统计
     recvStat(mtype, err) {
@@ -1541,7 +1633,7 @@
       mtype <= DONED && this.stat.incr('rnspgc');    // STAT 统计接收非小型数据包个数
       mtype === BROAD && this.stat.incr('rnspgc');   // TODO: 广播 暂时当作非小型数据包
       mtype === MULTI && this.stat.incr('rnspgc');   // TODO: 组播 暂时当作非小型数据包
-      this.event.emit("kudp-stat", this.statist());
+      this.onStat && this.onStat('recv', this.stat);
     }
 
     // 发送消息的统计
@@ -1553,62 +1645,7 @@
       mtype === BROAD && this.stat.incr('nspgc');   // TODO: 广播 暂时当作非小型数据包
       mtype === MULTI && this.stat.incr('nspgc');   // TODO: 组播 暂时当作非小型数据包
       (1 === dup) && this.stat.incr('dup');         // TODO 重复数据包
-    }
-
-    // 处理[SYNC数据包]设备上下线，各设备之间数据同步的功能
-    _handleSync(data) {
-      let one = null
-      data.message = Messge.ab2str(data.message);
-      data.message = data.message + ''
-      let method = data.message[0];
-      data.message = data.message.slice(1);
-      switch (method) {
-        case '@':
-          return this._handleLocal(data);
-        case '+':
-          one = this._addOnline(data.message, data.IPinfo.address, data.IPinfo.port);
-          break;
-        case '-':
-          one = this._delOnline(data.message);
-          break;
-        default:
-          break;
-      }
-      data.online = this.online.length;
-      one && this.event.emit("onMessage", data);
-      return data;
-    }
-
-    // 处理[LOCAL数据包]设备ip地址获取的功能
-    _handleLocal(data) {
-      let one = this._addOnline(data.message, data.IPinfo.address, data.IPinfo.port);
-      if (data.message == this.id) {
-        one.id = this.id;
-        data.id = this.id;
-        data.type = "LOCAL"
-        this.$e.once("localip", one);
-        this.event.emit("onMessage", data);
-      } else {
-        // 向新上线的用户推送所有在线
-        this.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
-      }
-      return one;
-    }
-
-    // 处理多播情况 TODO
-    _handleMulti(data) {
-      // 此时message 是当前上线的用户id
-      let one = this._addOnline(data.peerId, data.IPinfo.address, data.IPinfo.port);
-      // 如果是本设备
-      if (data.peerId == this.id) {
-        one.id = this.id;
-        this.$e.once("localip", one);
-        data.id = this.id;
-        this.event.emit("onMessage", data);
-      } else {
-        // 向新上线的用户推送所有在线
-        this.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
-      }
+      this.onStat && this.onStat('send', this.stat);
     }
 
     // 处理来自网络的确认包
@@ -1641,6 +1678,217 @@
 
     // 处理来自网络的数据包
     _handleOnMessage(mtype, seq, peerInfo, payload) {
+      this.onRead && this.onRead(mtype, seq, peerInfo, payload);
+    }
+
+    // 由于数据包会再未收到对应ACK包时会重传，针对ACK包无需设置超时重传
+    _sendAck(ip, port, mtype, seq) {
+      console.log("sendAck:", mtype, seq);
+      return this.sQueue.write(null, ip, port, mtype | ABROAD, seq);
+    }
+
+    // 新建一次新的传输过程，分配一个唯一的fd
+    open(ip, port, flag) {
+      return this.sQueue.open(ip, port, flag);
+    }
+
+    // 关闭一次传输, 释放对应的fd
+    close(fd) {
+      this.sQueue.close(fd);
+    }
+
+    // 基础网络方法
+    // 通过id发送mtype消息的数据data
+    write(fd, payload, ip, port) {
+      let self = this;
+      this.sQueue.addInfo(fd, { ip: ip, port: port })
+      let size = self.sQueue.write(fd, ip, port, BEGIN, payload);
+      this.onWrite && this.onWrite(fd, payload, ip, port);
+      return size;
+    }
+
+    // 向某一个设备id发送同步类型的数据，主要是同步本设备的数据更新
+    sync(ip, port, payload, mtype) {
+      return this.sQueue.write(FD_BROAD, ip, port, mtype || BROAD, payload);
+    }
+
+    // 广播数据包
+    broadcast(payload) {
+      return this.sync(BROADWAY, this.bport, payload || "");
+    }
+
+    /**
+     * TODO: 组播多播数据包
+     * IP多播通信必须依赖于IP多播地址，在IPv4中它是一个D类IP地址，范围从224.0.0.0 ~ 239.255.255.255，
+     * 并被划分为局部链接多播地址、预留多播地址和管理权限多播地址三类：
+     * 1. 局部链接多播地址: 224.0.0.0 ~ 224.0.0.255，为路由协议和其它用途保留的地址，路由器并不转发属于此范围的IP包；
+     * 2. 预留多播地址: 224.0.1.0 ~ 238.255.255.255，可用于全球范围（如Internet）或网络协议；
+     * 3. 管理权限多播地址: 239.0.0.0 ~ 239.255.255.255，可供组织内部使用，类似于私有IP地址，不能用于Internet，可限制多播范围。
+     */
+    multicast(payload, multiway) {
+      return this.sync(multiway, this.bport, payload || "", MULTI);
+    }
+  }
+
+  // 业务基于kudp 实现业务功能
+  class kudper {
+    constructor(port, event) {
+      // 用于与业务层的事件通知，将通知上报到业务层
+      this.event = event;
+      this.online = { length: 0 };
+      this.kudp = new kudp(port, {
+        onRead: this.recvFrom.bind(this),
+        onStat: this.statist.bind(this),
+      });
+      this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
+      this.init();
+    }
+
+    // 初始化各类回调
+    init() {
+      let self = this
+      wx.onNetworkStatusChange(function (res) {
+        self.offline()
+        wx.showToast({
+          title: '网络有点小问题',
+          icon: 'loading'
+        });
+        self.getLocalip(true);
+        setTimeout(() => {
+          wx.hideToast({
+            complete: (res) => { },
+          })
+        }, 1000)
+      })
+    }
+
+    // 获取分配的随机id
+    getId() {
+      let id = null
+      try {
+        let res = cache.get('LOCAL');
+        if (res) {
+          id = res
+        } else {
+          id = utils.RandomNum(0, IDMAX)
+          cache.set('LOCAL', id, EXPIRE);
+        }
+      } catch (e) {
+        id = utils.RandomNum(0, IDMAX)
+        cache.set('LOCAL', id, EXPIRE);
+      }
+      id = utils.Pad(id, IDLEN)
+      return id
+    }
+
+    // 发送上线广播通知
+    connect() {
+      return this.kudp.broadcast('@' + this.id);
+    }
+    // 下线广播
+    offline() {
+      if (this.online[this.id]) {
+        return this.kudp.broadcast('-' + this.id);
+        // this.upper.close()
+      }
+    }
+
+    // 添加上线用户id address port
+    _addOnline(id, address, port) {
+      let one = this.online[id];
+      if (!one) {
+        this.online.length++;
+      }
+      this.online[id] = {
+        address: address,
+        port: port
+      };
+      this.online[address] = id;
+      console.log("addOnline +++: ", this.online[id]);
+      return this.online[id];
+    }
+
+    // 删除下线用户id
+    _delOnline(id) {
+      let one = this.online[id];
+      if (one) {
+        delete this.online[id];
+        delete this.online[one.address];
+        this.online.length--;
+        console.log("delOnline --: ", one);
+      }
+      return one;
+    }
+
+    // 消息处理方法
+
+    // 处理[SYNC数据包]设备上下线，各设备之间数据同步的功能
+    _handleSync(data) {
+      let one = null
+      data.message = Messge.ab2str(data.message);
+      data.message = data.message + ''
+      let method = data.message[0];
+      data.message = data.message.slice(1);
+      switch (method) {
+        case '@':
+          return this._handleLocal(data);
+        case '+':
+          one = this._addOnline(data.message, data.IPinfo.address, data.IPinfo.port);
+          break;
+        case '-':
+          one = this._delOnline(data.message);
+          break;
+        default:
+          break;
+      }
+      data.online = this.online.length;
+      one && this.event.emit("onMessage", data);
+      return data;
+    }
+
+    // 处理[LOCAL数据包]设备ip地址获取的功能
+    _handleLocal(data) {
+      let one = this._addOnline(data.message, data.IPinfo.address, data.IPinfo.port);
+      if (data.message == this.id) {
+        one.id = this.id;
+        data.id = this.id;
+        data.type = "LOCAL"
+        this.event.emit("onMessage", data);
+      } else {
+        // 向新上线的用户推送所有在线
+        this.kudp.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
+      }
+      return one;
+    }
+
+    // 处理多播情况 TODO
+    _handleMulti(data) {
+      // 此时message 是当前上线的用户id
+      let one = this._addOnline(data.peerId, data.IPinfo.address, data.IPinfo.port);
+      // 如果是本设备
+      if (data.peerId == this.id) {
+        data.id = this.id;
+        this.event.emit("onMessage", data);
+      } else {
+        // 向新上线的用户推送所有在线
+        this.kudp.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
+      }
+    }
+
+    // 连接管理
+    open(ip, port, flag) {
+      return this.kudp.open(ip, port, flag);
+    }
+
+    close(fd) {
+      return this.kudp.close(fd);
+    }
+
+    sendTo(fd, payload, ip, port) {
+      return this.kudp.write(fd, payload, ip, port);
+    }
+
+    recvFrom(mtype, seq, peerInfo, payload) {
       let data = {
         seq: seq,
         message: payload,
@@ -1683,151 +1931,26 @@
       console.info("current", this);
     }
 
-    // 由于数据包会再未收到对应ACK包时会重传，针对ACK包无需设置超时重传
-    _sendAck(ip, port, mtype, seq) {
-      console.log("sendAck:", mtype, seq);
-      return this.sQueue.write(null, ip, port, mtype | ABROAD, seq);
-    }
-    // 添加上线用户id address port
-    _addOnline(id, address, port) {
-      let one = this.online[id];
-      if (!one) {
-        this.online.length++;
-      }
-      this.online[id] = {
-        address: address,
-        port: port
-      };
-      this.online[address] = id;
-      console.log("addOnline +++: ", this.online[id]);
-      return this.online[id];
-    }
-    // 删除下线用户id
-    _delOnline(id) {
-      let one = this.online[id];
-      if (one) {
-        delete this.online[id];
-        delete this.online[one.address];
-        this.online.length--;
-        console.log("delOnline --: ", one);
-      }
-      return one;
-    }
-  }
-
-  // 实现可靠的udp封装类
-  class kudp extends BaseUdper {
-    constructor(port, event) {
-      super(port)
-      // 用于与业务层的事件通知，将通知上报到业务层
-      this.event = event;
-      this.online = {
-        length: 0
-      };
-      this.init();
-    }
-
-    // 初始化各类回调
-    init() {
-      let self = this
-      super._init()
-      wx.onNetworkStatusChange(function (res) {
-        self.offline()
-        wx.showToast({
-          title: '网络有点小问题',
-          icon: 'loading'
-        });
-        self.getLocalip(true)
-        setTimeout(() => {
-          wx.hideToast({
-            complete: (res) => { },
-          })
-        }, 1000)
-      })
-    }
-    // 发送上线广播通知
-    connect() {
-      return this.broadcast('@' + this.id);
-    }
-    // 下线广播
-    offline() {
-      if (this.online[this.id]) {
-        return this.broadcast('-' + this.id);
-        // this.upper.close()
-      }
-    }
-    // 向某一个设备id发送同步类型的数据，主要是同步本设备的数据更新
-    sync(ip, port, payload) {
-      return this.sQueue.write(FD_BROAD, ip, port, BROAD, payload);
-    }
-
-    // 新建一次新的传输过程，分配一个唯一的fd
-    open(ip, port, flag) {
-      return this.sQueue.open(ip, port, flag);
-    }
-    // 关闭一次传输, 释放对应的fd
-    close(fd) {
-      this.sQueue.close(fd);
-    }
-
-    // 基础网络方法
-    // 通过id发送mtype消息的数据data
-    sendTo(fd, id, payload) {
-      let self = this;
-      let info = []
-      if (utils.IsIP(id)) {
-        info = [{ address: id, port: this.bport }];
-      } else {
-        info = self.getOthers(id) || [];
-      }
-      this.sQueue.addInfo(fd, { ip: info[0].address, port: info[0].port })
-      return Promise.all(info.map((item) => {
-        return self.sQueue.write(fd, item.address, item.port, BEGIN, payload);
-      }));
-    }
-
-    // 广播数据包
-    broadcast(payload) {
-      return this.sQueue.write(FD_BROAD, BROADWAY, this.bport, BROAD, payload || "");
-    }
-
-    /**
-     * TODO: 组播多播数据包
-     * IP多播通信必须依赖于IP多播地址，在IPv4中它是一个D类IP地址，范围从224.0.0.0 ~ 239.255.255.255，
-     * 并被划分为局部链接多播地址、预留多播地址和管理权限多播地址三类：
-     * 1. 局部链接多播地址: 224.0.0.0 ~ 224.0.0.255，为路由协议和其它用途保留的地址，路由器并不转发属于此范围的IP包；
-     * 2. 预留多播地址: 224.0.1.0 ~ 238.255.255.255，可用于全球范围（如Internet）或网络协议；
-     * 3. 管理权限多播地址: 239.0.0.0 ~ 239.255.255.255，可供组织内部使用，类似于私有IP地址，不能用于Internet，可限制多播范围。
-     */
-    multicast(payload, multiway) {
-      return this.sQueue.write(FD_MULTI, multiway, this.bport, MULTI, payload || "");
+    sendFile(fd, path, ip, port) {
+      console.log("sendFile: ", fd, path, ip, port)
     }
 
     // 工具方法
 
     // 获取最新的本设备的ip， 默认从缓存获取，否则再次发送广播获取
     getLocalip(forse) {
-      return new Promise((resolver, reject) => {
-        if (!forse) {
-          if (this.online[this.id]) {
-            let copy = Object.assign({ id: this.id }, this.online[this.id]);
-            resolver(copy);
-          } else {
-            reject(e)
-          }
-        } else {
-          this.connect().then(_ => {
-            this.$e.on("localip", this, resolver)
-          }).catch(e => {
-            reject(e)
-          })
-        }
-      });
+      if (!forse) {
+        return this.online[this.id];
+      } else {
+        this.connect();
+      }
     }
+
     // 获取本设备信息， 从缓存获取
     getSelf() {
       return this.online[this.id];
     }
+
     // 获取除本设备的其他所有设备, 如果id存在，即获取对应的信息
     getOthers(id) {
       if (id) {
@@ -1842,39 +1965,43 @@
       }
       return online;
     }
+
     // 统计工具
-    statist() {
+    statist(type, stat) {
+      if ('recv' !== type)
+        return;
       let format_str = ""
-      for (let key in this.stat.props) {
-        // console.log(key, this.stat.props[key]);
+      for (let key in stat.props) {
+        // console.log(key, stat.props[key]);
         if ('pgc' == key) {
-          format_str = format_str + "\n" + "发送数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "发送数据包：" + stat.props[key]
         } else if ('rpgc' == key) {
-          format_str = format_str + "\n" + "接收数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "接收数据包：" + stat.props[key]
         } else if ('ackpgc' == key) {
-          format_str = format_str + "\n" + "发送确认数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "发送确认数据包：" + stat.props[key]
         } else if ('rackpgc' == key) {
-          format_str = format_str + "\n" + "接收确认数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "接收确认数据包：" + stat.props[key]
         } else if ('dup' == key) {
-          format_str = format_str + "\n" + "dup值：" + this.stat.props[key]
+          format_str = format_str + "\n" + "dup值：" + stat.props[key]
         } else if ('spgc' == key) {
-          format_str = format_str + "\n" + "发送小型数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "发送小型数据包：" + stat.props[key]
         } else if ('nspgc' == key) {
-          format_str = format_str + "\n" + "发送非小型数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "发送非小型数据包：" + stat.props[key]
         } else if ('rspgc' == key) {
-          format_str = format_str + "\n" + "接收小型数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "接收小型数据包：" + stat.props[key]
         } else if ('rnspgc' == key) {
-          format_str = format_str + "\n" + "接收非小型数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "接收非小型数据包：" + stat.props[key]
         } else if ('erpgc' == key) {
-          format_str = format_str + "\n" + "错误数据包：" + this.stat.props[key]
+          format_str = format_str + "\n" + "错误数据包：" + stat.props[key]
         }
       }
       format_str = format_str.slice(1)
+      this.event.emit("kudp-stat", format_str);
       return format_str
     }
   }
 
-  exports.kudp = kudp;
+  exports.kudper = kudper;
   exports.Header = Header;
   exports.SeqManage = SeqManage;
   exports.Recver = Recver;
