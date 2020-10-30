@@ -46,8 +46,7 @@
   const task = require('./common/task')
   const timer = require('./common/timer')
   const heapify = require('./common/heapify')
-
-  const Messge = require("./message");
+  const Buffer = require('./common/Buffer/Buffer.js')
 
   const PROTONAME = 'kudp'
   const VERSION = 0x0 // kudp version
@@ -61,15 +60,19 @@
   const EXPIRE = 60000 // 60s
   const FACTOR = 4     // 默认放大因子
   const BASE_SECTION = 256 // 基础段长度
+  const KUDP_SNDBUF = 4194304 // 4 * 124 * 1024 kb
+  const KUDP_RCVBUF = 4194304 // 4 * 124 * 1024 kb
 
   // 重传机制超时时间
-  const ACK_TIMEOUT = 40
+  const ACK_TIMEOUT = 400
   // 局域网最大数据包大小
   const LAN_PACK_SIZE = 1024
   // 广域网最大数据包大小
   const WAN_PACK_SIZE = 512
   // 重试次数
   const RETRY = 100
+  // header leng
+  const HEADER_LEN = 8
 
 
   // TODO: errcode
@@ -86,6 +89,31 @@
   const EBADFD = 77          // File descriptor in bad state 文件描述符状态错误
   /** 200 ~ 255 未知错误 **/
   const EUNKONWN = 255
+
+
+
+
+  var LOG = {}
+  LOG.level_ = {
+    debug: 0,
+    info: 1,
+    warn: 2,
+    error: 3,
+    fatal: 4
+  }
+  LOG.level = 'warn';
+  LOG.func = function (funcName) {
+    return function (msg) {
+      if (LOG.level_[funcName] < LOG.level_[LOG.level]) { return; }
+      if (console && console[funcName]) {
+        console[funcName](msg);
+      }
+    };
+  };
+  LOG.warn = LOG.func('warn');
+  LOG.debug = LOG.func('log');
+  LOG.error = LOG.func('error');
+  LOG.info = LOG.func('info');
 
   const Errors = (code, msg) => {
     return { code: code, msg: msg };
@@ -178,7 +206,8 @@
       } else if (seq + size === segment[1]) {
         segment_tb = [[segment[0], segment[1] - size]]
       } else {
-        segment_tb = [[segment[0], seq], [seq + size, segment[1]]]
+        segment_tb = [[segment[0], seq], [seq + size, segment[1]]
+        ]
       }
       // 更新可用的区间段
       this.segment.splice(index, 1);
@@ -230,13 +259,10 @@
      * @param {boolean} loop true loop use seq number, false not loop
      * @returns {boolean} seq a next seq can be use 
      */
-    get(isn, loop) {
+    get(isn) {
       // 返回可用的最新的seq，然后自增
       if (isn > -1 && this.data[isn]['cursor']) {
-        let seq = this.data[isn]['cursor']++;
-        if (loop && this.data[isn]['cursor'] >= this.data[isn]['length']) {
-          seq = seq % this.data[isn]['length'];
-        }
+        let seq = isn + ((this.data[isn]['cursor']++) - isn) % this.data[isn]['length'];
         // 写入一个待确认的seq
         this.data[isn]['ack'].push(seq)
         return seq
@@ -336,13 +362,13 @@
       while (isn != -1 && ++i < 1000) {
         let size = utils.RandomNum(1, 104)
         isn = seqm.malloc(size);
-        // console.log(seqm.info(isn));
+        LOG.debug(seqm.info(isn));
         if (i % 50) {
           seqm.free(isn)
         } else {
           let seq = isn + utils.RandomNum(0, size);
           let losin = seqm.location(seq);
-          console.log(i, "seq:", seq, " location:", losin, " isn:", isn);
+          LOG.debug(i, "seq:", seq, " location:", losin, " isn:", isn);
         }
       }
       seqm.clear();
@@ -524,50 +550,50 @@
       for (let key in rHeadeType) {
         let head1 = new Header(rHeadeType[key]);
         heads.push(head1.header());
-        console.log("type Tesing info:", head1.info());
-        console.log("type Tesing data:", head1.header());
-        console.log("type Tesing Type:", head1.Type());
-        console.log("type Tesing Qos:", head1.Qos());
-        console.log("type Tesing Dup:", head1.Dup());
-        console.log("type Tesing Ack:", head1.Ack());
+        LOG.debug("type Tesing info:", head1.info());
+        LOG.debug("type Tesing data:", head1.header());
+        LOG.debug("type Tesing Type:", head1.Type());
+        LOG.debug("type Tesing Qos:", head1.Qos());
+        LOG.debug("type Tesing Dup:", head1.Dup());
+        LOG.debug("type Tesing Ack:", head1.Ack());
       }
       // Dup test
       for (let key in rHeadeType) {
         let head1 = new Header(rHeadeType[key], 1);
         heads.push(head1.header());
-        console.log("dup Tesing info:", head1.info());
-        console.log("dup Tesing data:", head1.header());
-        console.log("dup Tesing Type:", head1.Type());
-        console.log("dup Tesing Qos:", head1.Qos());
-        console.log("dup Tesing Dup:", head1.Dup());
-        console.log("dup Tesing Ack:", head1.Ack());
+        LOG.debug("dup Tesing info:", head1.info());
+        LOG.debug("dup Tesing data:", head1.header());
+        LOG.debug("dup Tesing Type:", head1.Type());
+        LOG.debug("dup Tesing Qos:", head1.Qos());
+        LOG.debug("dup Tesing Dup:", head1.Dup());
+        LOG.debug("dup Tesing Ack:", head1.Ack());
       }
       // Qos test
       for (let key in rHeadeType) {
         let head1 = new Header(rHeadeType[key], 0, 1);
         heads.push(head1.header());
-        console.log("qos Tesing info:", head1.info());
-        console.log("qos Tesing data:", head1.header());
-        console.log("qos Tesing Type:", head1.Type());
-        console.log("qos Tesing Qos:", head1.Qos());
-        console.log("qos Tesing Dup:", head1.Dup());
-        console.log("qos Tesing Ack:", head1.Ack());
+        LOG.debug("qos Tesing info:", head1.info());
+        LOG.debug("qos Tesing data:", head1.header());
+        LOG.debug("qos Tesing Type:", head1.Type());
+        LOG.debug("qos Tesing Qos:", head1.Qos());
+        LOG.debug("qos Tesing Dup:", head1.Dup());
+        LOG.debug("qos Tesing Ack:", head1.Ack());
       }
       // All test
       for (let key in rHeadeType) {
         let head1 = new Header(rHeadeType[key], 1, 1);
         heads.push(head1.header());
-        console.log("all Tesing info:", head1.info());
-        console.log("all Tesing data:", head1.header());
-        console.log("all Tesing Type:", head1.Type());
-        console.log("all Tesing Qos:", head1.Qos());
-        console.log("all Tesing Dup:", head1.Dup());
-        console.log("all Tesing Ack:", head1.Ack());
+        LOG.debug("all Tesing info:", head1.info());
+        LOG.debug("all Tesing data:", head1.header());
+        LOG.debug("all Tesing Type:", head1.Type());
+        LOG.debug("all Tesing Qos:", head1.Qos());
+        LOG.debug("all Tesing Dup:", head1.Dup());
+        LOG.debug("all Tesing Ack:", head1.Ack());
       }
       // test New
       for (let i in heads) {
         let header = Header.New(heads[i])
-        console.log("Tesing new info:", header.info());
+        LOG.debug("Tesing new info:", header.info());
       }
     }
   }
@@ -609,51 +635,83 @@
 
     // 编码数据包结构
     static pack(header, seq, payload, factor) {
-      let msg = new Messge();
-      msg.writeNumber(header.header(), 1);      // 消息类型，1byte
-      msg.writeNumber(seq, 4);         // 消息数据包序号 4byte
-      msg.writeNumber(0x0, 2);         // 消息checksum 2byte
+      let psize = Buffer.byteLength(payload, 'utf8')
+      // let msg = new Buffer(psize + HEADER_LEN);
+      // /** 写入header数据 */
+      // msg.writeUInt8(header.header());  // 0
+      // msg.writeUInt32BE(seq, 1);        // 1 ~ 4
+      // msg.writeUInt16BE(0x0, 5);        // 5 ~ 6
+      // if (BEGIN === header.Type()) {
+      //   // 消息区段
+      //   let rangesize = factor || FACTOR;
+      //   let lastlen = (rangesize << 4) | VERSION;
+      //   msg.writeUInt8(lastlen, 7);     // 7 消息区段 + version
+      // } else if (BDD === header.Type()) {
+      //   // 消息区段
+      //   let rangesize = 0
+      //   let lastlen = (rangesize << 4) | VERSION;
+      //   msg.writeUInt8(lastlen, 7);     // 7 消息区段 + version
+      // }
+      // /** 写入数据包内容 */
+      // msg.write(payload, HEADER_LEN)    // 8 消息内容
+      // let checksum = utils.Crc16(msg);
+      // msg.writeUInt16BE(checksum, 5);   // 5 ~ 6 消息checksum 2byte
+      // LOG.debug("pack compare1:", msg)
+
+      let msg2 = new Buffer(psize + HEADER_LEN);
+      /** 写入header数据 */
+      msg2.writeUInt8(header.header());    // 0
+      msg2.writeUInt32BE(seq);             // 1 ~ 4
+      msg2.writeUInt16BE(0x0);             // 5 ~ 6
       if (BEGIN === header.Type()) {
         // 消息区段
         let rangesize = factor || FACTOR;
         let lastlen = (rangesize << 4) | VERSION;
-        msg.writeNumber(lastlen, 1);   // 消息区段 + version
+        msg2.writeUInt8(lastlen);          // 7 消息区段 + version
       } else if (BDD === header.Type()) {
         // 消息区段
         let rangesize = 0
         let lastlen = (rangesize << 4) | VERSION;
-        msg.writeNumber(lastlen, 1);   // 消息区段 + version
+        msg2.writeUInt8(lastlen);          // 7 消息区段 + version
+      } else {
+        msg2.writeUInt8(0);                // 7 消息区段 + version
       }
-      msg.writeString(payload);        // 消息内容
-      let checksum = utils.Crc16(msg.toBytes());
-      msg.setNumber(checksum, 2, 5);   // 消息checksum 2byte
-      return [msg, checksum];
+      /** 写入数据包内容 */
+      msg2.write(payload)                  // 8 消息内容
+      let checksum2 = utils.Crc16(msg2);
+      msg2.writeUInt16BE(checksum2, 5);    // 5 ~ 6 消息checksum 2byte
+      // LOG.debug("pack compare2:", msg2, msg2.toString() == msg.toString())
+      return [msg2, checksum2];
     }
 
     // 解码数据包
     static unpack(buffer) {
       let pkg = new Package();
-      pkg.buffer = buffer;
-      let msg = new Messge(buffer);
-      pkg.header = Header.New(msg.readNumber(1));  // 消息类型，1byte
-      pkg.seq = msg.readNumber(4);                 // 消息数据包序号 4byte
-      pkg.checksum = msg.readNumber(2);            // 消息checksum 2byte
+      let msg = new Buffer(buffer)
+      /** 从buffer 读出header */
+      pkg.buffer = msg.buffer
+      pkg.header = Header.New(msg.readUInt8()); // 0
+      pkg.seq = msg.readUInt32BE(1);            // 1 ~ 4
+      pkg.checksum = msg.readUInt16BE(5);       // 5 ~ 6 消息checksum 2byte
       if (BEGIN === pkg.header.Type()) {
-        let lastlen = msg.readNumber(1);  // 消息区段 + version
+        let lastlen = msg.readUInt8(7);         // 7 消息区段 + version 
         // 消息区段
-        pkg.rangesize = lastlen >> 4;
+        pkg.rangesize = (lastlen >> 4) * BASE_SECTION;
         // kudp version
         pkg.version = lastlen & 0x0f;
       } else if (BDD === pkg.header.Type()) {
-        let lastlen = msg.readNumber(1);  // 消息区段 + version
+        let lastlen = msg.readUInt8(7);          // 7 消息区段 + version 
         // 消息区段
-        pkg.rangesize = lastlen >> 4;
+        pkg.rangesize = (lastlen >> 4) * BASE_SECTION;
         // kudp version
         pkg.version = lastlen & 0x0f;
       }
-      pkg.payload = msg.readBuffer();              // 消息内容
-      msg.setNumber(0, 2, 5);                      // check sum
-      let checksum = utils.Crc16(msg.toBytes());
+      /** 从buffer 读出消息内容 */
+      pkg.payload = msg.read(HEADER_LEN);         // 8 消息内容
+      pkg.payloadbuffer = msg.slice(HEADER_LEN)
+      msg.writeUInt16BE(0, 5);                    // 5 ~ 6 消息checksum 2byte
+      let checksum = utils.Crc16(msg);
+      // LOG.debug("unpack", msg, pkg)
       return (checksum == pkg.checksum) ? pkg : null;
     }
   }
@@ -751,7 +809,7 @@
     onClose() {
       return new Promise((resolver) => {
         this.kudper.onClose(function (res) {
-          console.log("onClose: ", res);
+          LOG.info("onClose: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
             IPinfo: res.remoteInfo,
@@ -762,7 +820,7 @@
     offClose() {
       return new Promise((resolver) => {
         this.kudper.offClose(function (res) {
-          console.log("offClose: ", res);
+          LOG.info("offClose: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
             IPinfo: res.remoteInfo,
@@ -773,7 +831,7 @@
     onError() {
       return new Promise((resolver) => {
         this.kudper.onError(function (res) {
-          console.log("onError: ", res);
+          LOG.error("onError: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
             IPinfo: res.remoteInfo,
@@ -784,7 +842,7 @@
     offError() {
       return new Promise((resolver) => {
         this.kudper.offError(function (res) {
-          console.log("offError: ", res);
+          LOG.error("offError: ", res);
           resolver({
             message: utils.NewAb2Str(res.message),
             IPinfo: res.remoteInfo,
@@ -875,10 +933,10 @@
     }
 
     defaultOptions = {
-      onUp: () => { console.log("onUp callback: ", arguments) },        // 上报上层回调
-      onEcho: () => { /*console.log("onEcho callback: ", arguments);*/ },    // 接收到消息后，回复ack
-      onAck: () => { console.log("onAck callback: ", arguments); },     // 接收到Ack类型数据包回调
-      onDone: () => { console.log("onDone callback: ", arguments); },   // 数据包接收完成回调
+      onUp: () => { LOG.info("onUp callback: ", arguments) },                 // 上报上层回调
+      onEcho: () => {        /*LOG.info("onEcho callback: ", arguments);*/ }, // 接收到消息后，回复ack
+      onAck: () => { LOG.info("onAck callback: ", arguments); },              // 接收到Ack类型数据包回调
+      onDone: () => { LOG.info("onDone callback: ", arguments); },            // 数据包接收完成回调
       onTick: null,
     }
 
@@ -896,7 +954,7 @@
 
     // 接收到数据
     onMessage(res) {
-      let { mtype, seq, peerInfo, payload, rangesize, version } = this.decode(res.remoteInfo, res.message);
+      let { mtype, seq, peerInfo, payload, rangesize, version, payloadbuffer } = this.decode(res.remoteInfo, res.message);
       if (mtype < ABROAD) {
         this.push(mtype, seq, peerInfo, payload, rangesize, version);
       } else {
@@ -908,7 +966,7 @@
     // 接收方：处理来自网络的数据包 推送一个接收到的数据到接收队列，
     push(mtype, seq, peerInfo, payload, rangesize, version) {
       // 发送ack数据包
-      // console.log("Push seq:", seq, payload);
+      LOG.info("Push seq:", seq, payload);
       this.onEcho(peerInfo.address, peerInfo.port, mtype, seq);
       let data = { seq: seq, message: payload, IPinfo: peerInfo, iPint: peerInfo.ipint, };
       switch (mtype) {
@@ -930,11 +988,11 @@
           break;
         case BROAD:
           data.type = 'BROAD';
-          this.onUp(mtype, seq, peerInfo, payload);
+          this.onUp(seq, mtype, seq, peerInfo, payload);
           break;
         case MULTI:
           data.type = 'MULTI';
-          this.onUp(mtype, seq, peerInfo, payload);
+          this.onUp(seq, mtype, seq, peerInfo, payload);
           break;
         default:
           break;
@@ -993,13 +1051,15 @@
         M: isn + rangesize,        // node.M 数据包最大序号
         P: isn,                    // node.P 待上报的最小seq
         Q: new heapify(rangesize), // node.Q 记录已经收到的数据，按seq的PQ
-        T: BEGIN, V: version       // node.T node.V 数据包类型及协议版本
+        T: BEGIN,
+        V: version,                // node.T node.V 数据包类型及协议版本
+        BF: Buffer.alloc(KUDP_RCVBUF),
       }
       // other 标记该queue的节点是否已经被操作完成，此处表示该节点对应的数据块是否已经接收完
       let curnode = this.queue.insert(node, { done: 0, stat: 0 });
       if (curnode && 1 === curnode.other.done) {
         curnode.other.stat++;
-        console.log("begin Repeat:", isn)
+        LOG.warn("begin Repeat:", isn)
         return;
       }
       node._ = curnode;
@@ -1014,7 +1074,7 @@
         let payload3 = seq_data[3];
         // 记录最大seq
         if (DONED === mtype)
-          curnode.data['M'] = seq;
+          curnode.data['M'] = seq1;
         if (peer2.address === peerInfo.address && peer2.port === peerInfo.port &&  // 必须是同一个ip:port
           seq1 >= node.seq && seq1 < node.L) {
           this.addSeqQueue(node, seq1, payload3);
@@ -1027,7 +1087,7 @@
     // 处理 BDD 数据，直接上报
     bdd(isn, peerInfo, payload, rangesize, version) {
       this.queue.insert({ seq: isn, peer: peerInfo, L: isn + rangesize, Q: [{ [isn]: payload }], T: BDD, V: version })
-      this.onUp(BDD, isn, peerInfo, payload);
+      this.onUp(isn, BDD, isn, peerInfo, payload);
     }
 
     /**
@@ -1051,7 +1111,7 @@
     checkQ(node) {
       // 如果已经接收结束，不应该再走入下面的流程中
       if (1 === node['_'].other.done) {
-        console.log("queue isn: ", node['seq'], ' is done!')
+        LOG.error("queue isn: ", node['seq'], ' is done!')
         return;
       }
       let Q = node['Q'];
@@ -1068,14 +1128,15 @@
           this.freeSeq({ seq: priority })
           // TODO：回收已经上报的seq，时机是否合适？
           let pld = Q.pop();
-          payloads = (null === payloads) ? pld : Messge.mergeArrayBuffer(payloads, pld);
-          node['P']++;
+          this.checkRcvBuf(node, pld);
+          payloads = (null === payloads) ? new Buffer(pld) : Buffer.concat([payloads, new Buffer(pld)]);
         }
-        payloads && this.onUp(node['T'], node['P'], node['peer'], payloads);
-        payloads && console.log(Messge.ab2str(payloads));
+        // payloads && node['BF'].write(payloads.buffer);
+        // payloads && this.onUp(node['seq'], node['T'], node['P'], node['peer'], payloads);
+        // payloads && LOG.debug("checkQ:", payloads.toString())
       }
       // 表示数据包已经接受完毕, 设置定时器释放可能没有释放queue
-      if (node['M'] <= node['P']) {
+      if (this.isOver(node)) {
         node['_'].other.done = 1; // 当前数据块，接收数据已经
         this.onDone(node['seq'], node['peer']);
         /**
@@ -1090,6 +1151,34 @@
         //   }
         // }, { seq: node['seq'] }).start(ACK_TIMEOUT * 10);
       }
+    }
+
+    checkRcvBuf(node, deltaData) {
+      let len = deltaData.length
+      let offset = node['BF']._woffset
+      let max = node['BF'].length
+      if (len + offset < max) {
+        let a = node['BF']._woffset
+        node['BF'].write(deltaData);
+        node['P']++;
+        LOG.info("checkRcvBuf", a, node['p'])
+        if (this.isOver(node)) {
+          LOG.info("checkRcvBuf", a, node['BF']._woffset, node['BF'].slice(0, node['BF']._woffset).toString())
+          this.onUp(node['seq'], node['T'], node['P'], node['peer'], node['BF'].slice(0, node['BF']._woffset).toString());
+        }
+      } else if (len + offset >= max) {
+        this.onUp(node['seq'], node['T'], node['P'], node['peer'], node['BF'].toString());
+        node['BF'].flush();
+        node['BF'].write(deltaData);
+        node['P']++;
+      } else {
+
+      }
+      return false;
+    }
+
+    isOver(node) {
+      return node['M'] <= node['P'];
     }
 
     /**
@@ -1107,7 +1196,7 @@
           if (curnode.data) {
             // 记录最大seq
             if (DONED === mtype)
-              curnode.data['M'] = seq;
+              curnode.data['M'] = +seq + 1;
             if (curnode.data['P'] > seq) {
               curnode.other.stat++;
             } else {
@@ -1127,20 +1216,20 @@
       if (seq >= node['P']) {
         node['Q'].push(payload, seq);
       } else {
-        console.log("addSeqQueue Repeat:", seq)
+        LOG.warn("addSeqQueue Repeat:", seq)
       }
     }
 
     /**
-    * 原则：尽可能的保证对方收到ACK。
-    * 1. 在2 * ACK_TIMEOUT，仍然没有收到对方的重复数据包，即可认为对方已经收到对应的seq的ack，即可释放对应seq
-    * 2. 如果重新收到同一seq的数据包，说明对方没有收到ACK，此时需要重新启动同一个定时器，避免seq被释放
-    */
+     * 原则：尽可能的保证对方收到ACK。
+     * 1. 在2 * ACK_TIMEOUT，仍然没有收到对方的重复数据包，即可认为对方已经收到对应的seq的ack，即可释放对应seq
+     * 2. 如果重新收到同一seq的数据包，说明对方没有收到ACK，此时需要重新启动同一个定时器，避免seq被释放
+     */
     addSeqTimer(seq) {
       let seqTimer = this.timers[Recver.prefix + seq]
       if (!seqTimer) {
         seqTimer = new timer({
-          onrestart: (...args) => { console.log(args, 'timer restart') },
+          onrestart: (...args) => { LOG.warn(args, 'timer restart') },
           onend: (args) => { this.freeSeq(args); }
         }, { seq: seq });
         // 记录下每个数据包的定时器，在必要的时候重置定时器
@@ -1174,14 +1263,12 @@
     // 解析从外界收到的数据包
     decode(peer, buffer) {
       let pkg = Package.unpack(buffer);
-      let payload = pkg.payload, mtype = pkg.header.Type(), seq = pkg.seq;
-      // ip对应的数字
-      peer.ipint = utils.Ip2Int(peer.address);
-      // 来自ip的序号位seq的数据包。唯一标识
-      peer.ipseq = peer.ipint + SEP + seq;
+      let mtype = pkg.header.Type(),
+        seq = pkg.seq;
+      peer.ipint = utils.Ip2Int(peer.address); // ip对应的数字
       return {
-        mtype: mtype, seq: seq, peerInfo: (peer || {}), payload: payload,
-        rangesize: pkg.rangesize, version: pkg.version
+        mtype: mtype, seq: seq, peerInfo: (peer || {}), payload: pkg.payload,
+        rangesize: pkg.rangesize, version: pkg.version, payloadbuffer: pkg.payloadbuffer
       }
     }
 
@@ -1197,7 +1284,7 @@
       let peerInfo = { address: "127.0.0.1", port: 5328 };
       // 新建一个测试任务表
       const t = new task(concurrency, () => {
-        // console.log(rQueue, 'All task done!');
+        // LOG.warn(rQueue, 'All task done!');
       });
 
       // 测试任务函数, 模拟 BEGIN/DOING/DONED 数据包
@@ -1219,19 +1306,18 @@
           }
         }
         let payload = "Testing" + SEP + HeaderType[mtype] + SEP + seq;
-        // payload = Messge.str2ab(payload);
         let pkg = { seq: seq, size: payload.length, type: mtype, payload: payload, factor: rangesize }
         let pack = new Package(mtype, 0, 0, 0, pkg);
         rQueue.onMessage({ remoteInfo: peerInfo, message: pack.buffer });
 
         switch (mtype) {
           case BDD:
-            console.log("Tested" + SEP + HeaderType[mtype] + SEP + seq);
+            LOG.warn("Tested" + SEP + HeaderType[mtype] + SEP + seq);
             return;
           case BEGIN:
           case DOING:
           case DONED:
-            t.addTask(utils.RandomNum(0, ACK_TIMEOUT), Task, isn, seq_list, peerInfo, rangesize);
+            t.addTask(utils.RandomNum(0, ACK_TIMEOUT / 2), Task, isn, seq_list, peerInfo, rangesize);
             break;
           default:
             break;
@@ -1242,12 +1328,12 @@
         // 生成 BEGIN/BDD 的isn
         let seq = utils.RandomNum(1, 100000);
         // 生成 rangesize, 如果非BDD，随机生成一个长度
-        let rangesize = utils.RandomNum(2, 20);
+        let rangesize = 4 // utils.RandomNum(1, 5);
         let seq_list = utils.Shuffle(utils.Range(seq, seq + rangesize));
         let gray = utils.RandomGray(seq_list, 0.2) || []
-        console.log("Testing gray:", gray)
+        LOG.info("Testing gray:", gray)
         seq_list.push(...gray);
-        console.log("Testing all:", seq_list)
+        LOG.info("Testing all:", seq_list)
         // 添加到测试任务中
         t.addTask(utils.RandomNum(0, ACK_TIMEOUT), Task, seq, seq_list, peerInfo, rangesize);
       }
@@ -1308,14 +1394,14 @@
    *
    * 关键成员功能作用:
    *
-   * - timers: 发送器级别，管理所有发送的数据包的序号及其重试处理，以确保数据超时重试，且在收到ACK时释放，还有在重试超过某一限制时将会向发送方的业务层抛出错误，对应onError回调
+   * - timers: 发送器级别，管理所有发送的数据包的序号及其重试处理，以确保数据超时重试，且在收到ACK时释放，还有在重试超过某一限制时将会向发送方的业务层抛出错误，对应onErrs回调
    * - conn: 发送器/数据块级别，连接器，用于数据块传输过程中的发送方的seq的管理中心，用于标识定位发送的数据包是属于哪个数据块。
    * - seqer: 发送器级别，seq 管理器，用于在需要的时候分配和生成以及ACK时的释放，是数据块之间分组的核心模块。存在攻击风险。 TODO：优化管理效率，谨防恶意攻击
    * - stat: 发送器级别，发送的过程中统计信息，用于流控做分析准备，简单的限流工具.
    * - timeout, delta: 发送器级别，简单的限流工具，通过多次传输过程 send -> ack 之间的耗时均值，加上一个delta，作为后期的timer的timeout。
    * - repeat: 数据块级别，超时重试次数，超过该次数将会上抛异常回调。
    * - onSend: 数据块级别，数据包准备好，可以发送时的回调，用于屏蔽具体发送方式，上层觉得操作方法。
-   * - onError: 数据块级别，单次传输超时时的重试次数，超过时将回调该函数，用户方便业务层异常提示，阈值为 repeat
+   * - onErrs: 数据块级别，单次传输超时时的重试次数，超过时将回调该函数，用户方便业务层异常提示，阈值为 repeat
    * - onDone: 数据块级别，数据块发送完成时的回调。
    *
    */
@@ -1332,10 +1418,10 @@
     }
 
     defaultOptions = {
-      onSend: () => { console.log("onUp callback: ", arguments) },    // 准备发送数据
-      onError: () => { console.log("onUp onError: ", arguments) },    // 重试次数过多异常
-      onDone: () => { console.log("onDone callback: ", arguments); }, // 数据块发送完成
-      timeout: ACK_TIMEOUT,                                           // 重试的超时时间
+      onSend: () => { LOG.info("onSend callback: ", arguments) }, // 准备发送数据
+      onErrs: () => { LOG.error("onErrs onErrs: ", arguments) }, // 重试次数过多异常
+      onDone: () => { LOG.info("onDone callback: ", arguments); }, // 数据块发送完成
+      timeout: ACK_TIMEOUT, // 重试的超时时间
       repeat: 10,
     }
 
@@ -1431,7 +1517,7 @@
 
     // 定时器超时重传
     retry(seq, mtype, ip, port, pack, ctx) {
-      console.log('retry: ', seq, mtype, ip, port, pack, ctx)
+      LOG.warn('retry: ', seq, mtype, ip, port, pack, ctx)
       this.stat.incr('retry');
       pack.setFlags(1, 0, 0); // 添加dup标志
       this.onSend(mtype, ip, port, pack.buffer, 1);
@@ -1439,7 +1525,7 @@
       if (this.timers[Sender.prefix + seq].repeat < this.repeat) {
         this.timers[Sender.prefix + seq].restart(this.timeout);
       } else {
-        this.onError(seq, mtype, ip, port, pack);
+        this.onErrs(seq, mtype, ip, port, pack);
       }
     }
 
@@ -1470,14 +1556,14 @@
         }
       }
       // 删除发送窗口中的分配的序号
-      console.log("free Ack:", seq, mtype)
+      // LOG.info("free Ack:", seq, HeaderType[mtype])
       let isn = this.seqer.location(seq)
       if (isn >= 0) {
         // 释放seq，BEGIN / DOING 是否中间的seq
         if (ABEGIN === mtype || ADOING === mtype) {
           this.seqer.del(seq, isn);
         } else {
-          this.seqer.free(seq);
+          this.seqer.free(isn);
         }
       }
     }
@@ -1489,7 +1575,7 @@
         onstop: (args) => {
           this.stat.incr('packcnt');
           this.stat.avg('spendavg', args.spend);
-          console.log("onstop: ", args.spend, this.timeout, this.stat.get('spendavg'));
+          LOG.info("onstop: ", args.spend, this.timeout, this.stat.get('spendavg'));
           // 数据包发送超过 this.repeat， 尝试风险timeout
           if (0 === this.stat.get('packcnt') % this.repeat) {
             this.timeout = Math.ceil(this.stat.get('spendavg'), this.delta);
@@ -1570,14 +1656,13 @@
       this.stat = new Stat();   // 统计分析模块
       this.sQueue = new Sender({
         onSend: this._onSend.bind(this),
-        onError: () => { wx.showToast({ title: '网络有点小问题', icon: 'loading' }); }
+        onErrs: this._onErrs.bind(this),
       })
       this.rQueue = new Recver({
         onUp: this._handleOnMessage.bind(this),
         onEcho: this._sendAck.bind(this),
         onAck: this._handleAckMessage.bind(this),
         onTick: this.recvStat.bind(this),
-        onDone: null
       });
       this.initOptions(options);
       this._init();
@@ -1587,6 +1672,7 @@
       onRead: null,   // 读取到网络上的数据回调
       onWrite: null,  // 向网络发送数据时回调
       onStat: null,   // 数据分析统计回调
+      onErr: null,    // 传输异常时回调
     }
 
     // 初始化cb options
@@ -1624,6 +1710,11 @@
       return this.send(ip, port, message);
     }
 
+    // 传输异常回调
+    _onErrs(seq, mtype, ip, port, pack) {
+      this.onErrs && this.onErrs();
+    }
+
     // 接收消息的统计
     recvStat(mtype, err) {
       // STAT 统计接收数据包个数，错误数据包个数, 比如checksum error
@@ -1638,7 +1729,7 @@
 
     // 发送消息的统计
     sendStat(mtype, dup) {
-      this.stat.incr('pgc');// STAT 统计发送数据包个数
+      this.stat.incr('pgc');                        // STAT 统计发送数据包个数
       mtype >= ABROAD && this.stat.incr('ackpgc');  // 确认包
       mtype === BDD && this.stat.incr('spgc');      // STAT 统计发送小型数据包个数
       mtype !== BDD && this.stat.incr('nspgc');     // STAT 统计发送非小型数据包个数
@@ -1677,13 +1768,13 @@
     }
 
     // 处理来自网络的数据包
-    _handleOnMessage(mtype, seq, peerInfo, payload) {
-      this.onRead && this.onRead(mtype, seq, peerInfo, payload);
+    _handleOnMessage(isn, mtype, seq, peerInfo, payload) {
+      this.onRead && this.onRead(isn, mtype, seq, peerInfo, payload);
     }
 
     // 由于数据包会再未收到对应ACK包时会重传，针对ACK包无需设置超时重传
     _sendAck(ip, port, mtype, seq) {
-      console.log("sendAck:", mtype, seq);
+      // LOG.info("sendAck:", seq, HeaderType[mtype]);
       return this.sQueue.write(null, ip, port, mtype | ABROAD, seq);
     }
 
@@ -1699,10 +1790,10 @@
 
     // 基础网络方法
     // 通过id发送mtype消息的数据data
-    write(fd, payload, ip, port) {
+    write(fd, payload, ip, port, flag) {
       let self = this;
       this.sQueue.addInfo(fd, { ip: ip, port: port })
-      let size = self.sQueue.write(fd, ip, port, BEGIN, payload);
+      let size = self.sQueue.write(fd, ip, port, flag || BEGIN, payload);
       this.onWrite && this.onWrite(fd, payload, ip, port);
       return size;
     }
@@ -1739,6 +1830,13 @@
       this.kudp = new kudp(port, {
         onRead: this.recvFrom.bind(this),
         onStat: this.statist.bind(this),
+        onErrs: () => {
+          LOG.error("kudper onErrs");
+          wx.showToast({
+            title: '网络有点小问题',
+            icon: 'loading'
+          });
+        }
       });
       this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
       this.init();
@@ -1804,7 +1902,7 @@
         port: port
       };
       this.online[address] = id;
-      console.log("addOnline +++: ", this.online[id]);
+      LOG.info("addOnline +++: ", this.online[id]);
       return this.online[id];
     }
 
@@ -1815,7 +1913,7 @@
         delete this.online[id];
         delete this.online[one.address];
         this.online.length--;
-        console.log("delOnline --: ", one);
+        LOG.info("delOnline --: ", one);
       }
       return one;
     }
@@ -1825,7 +1923,6 @@
     // 处理[SYNC数据包]设备上下线，各设备之间数据同步的功能
     _handleSync(data) {
       let one = null
-      data.message = Messge.ab2str(data.message);
       data.message = data.message + ''
       let method = data.message[0];
       data.message = data.message.slice(1);
@@ -1885,11 +1982,26 @@
     }
 
     sendTo(fd, payload, ip, port) {
-      return this.kudp.write(fd, payload, ip, port);
+      let PACK_SIZE = utils.IsLanIP(ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
+      let psize = Buffer.byteLength(payload, 'utf8')
+      LOG.info("sendTo:", psize)
+      if (psize <= PACK_SIZE) {
+        return this.kudp.write(fd, payload, ip, port);
+      }
+      let times = Math.ceil(psize / PACK_SIZE)
+      for (let i = 0; i < times; ++i) {
+        let data = payload.slice(i, (i + 1) * PACK_SIZE + 1);
+        if (i + 1 === times)
+          this.kudp.write(fd, data, ip, port, DONED);
+        else
+          this.kudp.write(fd, data, ip, port);
+      }
+      return 0;
     }
 
-    recvFrom(mtype, seq, peerInfo, payload) {
+    recvFrom(isn, mtype, seq, peerInfo, payload) {
       let data = {
+        isn: isn,
         seq: seq,
         message: payload,
         IPinfo: peerInfo,
@@ -1914,12 +2026,11 @@
           break;
         case DONED:
           data.type = 'DONED';
-          data.message = Messge.ab2str(payload);
+          LOG.info("recvFrom: ", data.message);
           this.event.emit("onMessage", data);
           break;
         case BDD:
           data.type = 'BDD';
-          data.message = Messge.ab2str(payload);
           this.event.emit("onMessage", data);
           break;
         default:
@@ -1932,7 +2043,7 @@
     }
 
     sendFile(fd, path, ip, port) {
-      console.log("sendFile: ", fd, path, ip, port)
+      LOG.info("sendFile: ", fd, path, ip, port)
     }
 
     // 工具方法
@@ -1972,7 +2083,7 @@
         return;
       let format_str = ""
       for (let key in stat.props) {
-        // console.log(key, stat.props[key]);
+        // LOG.info(key, stat.props[key]);
         if ('pgc' == key) {
           format_str = format_str + "\n" + "发送数据包：" + stat.props[key]
         } else if ('rpgc' == key) {

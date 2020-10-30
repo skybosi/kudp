@@ -147,16 +147,24 @@
 
     /**
      * 将字符串写入buffer
-     * @param {String} str 
+     * @param {String} str
      */
     writeString(str) {
       if (typeof str === 'object') {
         return this.writeObject(str)
       }
-      if (str && 0 != str.length) {
-        let arr = str2ab(str);
-        this.buffer = this.buffer ? mergeArrayBuffer(this.buffer, arr) : arr;
+      if (!str) {
+        return false;
       }
+      return this.writeBuffer(str2ab(str));
+    }
+
+    /**
+     * 将字符串写入buffer
+     * @param {String} str
+     */
+    writeBuffer(buf) {
+      this.buffer = this.buffer ? mergeArrayBuffer(this.buffer, buf) : buf;
       return true
     }
 
