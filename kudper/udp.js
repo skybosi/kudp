@@ -10,9 +10,9 @@
   'use strict'
 
   const cache = require('./cache')
-  const kudp = require('./lib/kudp').kudp
-  const utils = require('./lib/common/utils')
-  const ckudp = require('./lib/constant')
+  const kudp = require('../lib/kudp').kudp
+  const utils = require('../lib/common/utils')
+  const ckudp = require('../lib/constant')
 
   const IDLEN = 5
   const IDMAX = Math.pow(10, IDLEN)
