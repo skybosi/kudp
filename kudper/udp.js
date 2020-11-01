@@ -10,9 +10,9 @@
   'use strict'
 
   const cache = require('./cache')
-  const kudp = require('../lib/kudp').kudp
+  const kudp = require('../lib/kudp')
   const utils = require('../lib/common/utils')
-  const ckudp = require('../lib/constant')
+  const Buffer = require('../lib/common/Buffer/Buffer')
 
   const IDLEN = 5
   const IDMAX = Math.pow(10, IDLEN)
@@ -40,13 +40,36 @@
   LOG.error = LOG.func('error');
   LOG.info = LOG.func('info');
 
+
+  const WORD = '0'   // ascii byte 48
+  const TEXT = '1'   // ascii byte 49
+  const IMAGE = '2'  // ascii byte 50
+  const AUDIO = '3'  // ascii byte 51
+  const VIDEO = '4'  // ascii byte 51
+
+  const MsgType = {
+    [WORD]: 'WORD',
+    [TEXT]: 'TEXT',
+    [IMAGE]: 'IMAGE',
+    [AUDIO]: 'AUDIO',
+    [VIDEO]: 'VIDEO',
+  }
+
+  const rMsgType = {
+    "WORD": WORD,
+    "TEXT": TEXT,
+    "IMAGE": IMAGE,
+    "AUDIO": AUDIO,
+    "VIDEO": VIDEO,
+  }
+
   // 业务基于kudp 实现业务功能
   class kudper {
     constructor(port, event) {
       // 用于与业务层的事件通知，将通知上报到业务层
       this.event = event;
       this.online = { length: 0 };
-      this.kudp = new kudp(port, {
+      this.kudp = new kudp.kudp(port, {
         onRead: this.recvFrom.bind(this),
         onStat: this.statist.bind(this),
         onErrs: () => {
@@ -58,6 +81,7 @@
         }
       });
       this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
+      this.pool = {};           // 接收数据包池子
       this.init();
     }
 
@@ -191,6 +215,23 @@
       }
     }
 
+    // 处理不同的数据内容类型
+    _handleContentType(content_type, data) {
+      LOG.info("compare1:", this.ori)
+      LOG.info("compare2:", data.message)
+      LOG.info("compare:", this.ori == data.message)
+      switch (content_type) {
+        case WORD:
+          this.event.emit("onMessage", data);
+          break;
+        case TEXT:
+        case IMAGE:
+        case AUDIO:
+        case VIDEO:
+          break;
+      }
+    }
+
     // 连接管理
     open(ip, port, flag) {
       return this.kudp.open(ip, port, flag);
@@ -202,17 +243,15 @@
 
     sendTo(fd, payload, ip, port) {
       this.ori = payload
-      let PACK_SIZE = utils.IsLanIP(ip) ? ckudp.WAN_PACK_SIZE : ckudp.LAN_PACK_SIZE;
-      let psize = payload.length // Buffer.byteLength(payload, 'utf8')
+      let PACK_SIZE = utils.IsLanIP(ip) ? kudp.WAN_PACK_SIZE : kudp.LAN_PACK_SIZE;
+      let buff = Buffer.from(WORD + payload);
+      let psize = buff.length;
+      let times = Math.ceil(psize / PACK_SIZE);
       LOG.info("sendTo:", psize)
-      if (psize <= PACK_SIZE) {
-        return this.kudp.write(fd, payload, ip, port);
-      }
-      let times = Math.ceil(psize / PACK_SIZE)
       for (let i = 0; i < times; ++i) {
-        let data = payload.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
+        let data = buff.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
         if (i + 1 === times)
-          this.kudp.write(fd, data, ip, port, ckudp.DONED);
+          this.kudp.write(fd, data, ip, port, kudp.DONED);
         else
           this.kudp.write(fd, data, ip, port);
       }
@@ -224,50 +263,41 @@
         isn: isn, seq: seq, message: payload,
         IPinfo: peerInfo, iPint: peerInfo.ipint,
       };
-      let payloadT = (typeof (payload) !== 'string');
-      // 对内部处理于非Buffer类型的数据内容
-      if (!payloadT) {
-        switch (mtype) {
-          case ckudp.BROAD:
-            data.type = 'BROAD';
-            console.info("online", this.online);
-            this._handleSync(data);
-            return;
-          case ckudp.MULTI:
-            data.type = 'MULTI';
-            this._handleMulti(data);
-            return;
-          default:
-            data.type = mtype;
-            this.event.emit("onMessage", data);
-            return;
-        }
-      }
       // 数据传输类型
       switch (mtype) {
-        case ckudp.BEGIN:
-          data.type = 'BEGIN';
-          LOG.info("compare:", this.ori == data.message)
-          this.event.emit("onMessage", data);
+        case kudp.BROAD:
+          console.info("online", this.online);
+          data.message = data.message.toString();
+          this._handleSync(data);
           break;
-        case ckudp.DOING:
-          data.type = 'DOING';
-          this.event.emit("onMessage", data);
+        case kudp.MULTI:
+          data.message = data.message.toString();
+          this._handleMulti(data);
           break;
-        case ckudp.DONED:
-          data.type = 'DONED';
-          LOG.info("compare:", this.ori == data.message)
-          this.event.emit("onMessage", data);
+        case kudp.BEGIN: case kudp.DOING: case kudp.DONED:
+          if (!this.pool[isn]) {
+            this.pool[isn] = {}
+            this.pool[isn]['content_type'] = payload.read(0, 1);
+            this.pool[isn]['content'] = payload.slice(1);
+          } else {
+            this.pool[isn]['content'] = Buffer.concat([this.pool[isn]['content'], payload]);
+          }
+          if (kudp.DONED === mtype) {
+            data.message = this.pool[isn]['content'].toString();
+            this._handleContentType(this.pool[isn]['content_type'].toString(), data);
+            delete this.pool[isn];
+          }
           break;
-        case ckudp.BDD:
-          data.type = 'BDD';
-          this.event.emit("onMessage", data);
+        case kudp.BDD:
+          this.content_type = payload.read(0, 1);
+          payload = payload.slice(1);
+          data.message = payload.toString();
+          this._handleContentType(this.content_type.toString(), data);
           break;
         default:
-          data.type = mtype;
-          this.event.emit("onMessage", data);
-          break;
+          throw new TypeError('header type is invalid:', mtype);
       }
+      return;
     }
 
     sendFile(fd, path, ip, port) {
