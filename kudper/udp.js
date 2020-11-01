@@ -9,6 +9,7 @@
 }(this, function () {
   'use strict'
 
+  const File = require('./file')
   const cache = require('./cache')
   const kudp = require('../lib/kudp')
   const utils = require('../lib/common/utils')
@@ -72,13 +73,16 @@
       this.kudp = new kudp.kudp(port, {
         onRead: this.recvFrom.bind(this),
         onStat: this.statist.bind(this),
-        onErrs: () => {
-          LOG.error("kudper onErrs");
+        onWerr: (...args) => {
+          LOG.error("kudper onErrs", ...args);
           wx.showToast({
             title: '网络有点小问题',
             icon: 'loading'
           });
-        }
+        },
+        onWdone: (...args) => {
+          LOG.info("kudper onWdone:", ...args);
+        },
       });
       this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
       this.pool = {};           // 接收数据包池子
@@ -217,8 +221,8 @@
 
     // 处理不同的数据内容类型
     _handleContentType(content_type, data) {
-      LOG.info("compare1:", this.ori)
-      LOG.info("compare2:", data.message)
+      LOG.debug("compare1:", this.ori)
+      LOG.debug("compare2:", data.message)
       LOG.info("compare:", this.ori == data.message)
       switch (content_type) {
         case WORD:
@@ -247,7 +251,7 @@
       let buff = Buffer.from(WORD + payload);
       let psize = buff.length;
       let times = Math.ceil(psize / PACK_SIZE);
-      LOG.info("sendTo:", psize)
+      LOG.debug("sendTo:", psize)
       for (let i = 0; i < times; ++i) {
         let data = buff.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
         if (i + 1 === times)
@@ -283,6 +287,10 @@
             this.pool[isn]['content'] = Buffer.concat([this.pool[isn]['content'], payload]);
           }
           if (kudp.DONED === mtype) {
+            var file = new File('fdjkudptmp');
+            file.write(this.pool[isn]['content']);
+            file.close();
+            let a = file.read();
             data.message = this.pool[isn]['content'].toString();
             this._handleContentType(this.pool[isn]['content_type'].toString(), data);
             delete this.pool[isn];
@@ -367,6 +375,21 @@
       format_str = format_str.slice(1)
       this.event.emit("kudp-stat", format_str);
       return format_str
+    }
+
+    // serialize the data
+    serialize(data) {
+      let type = utils.Type(data);
+      switch (type) {
+        case "Number": case "String":
+          return data;
+        case "Array": case "Object":
+          return JSON.stringify(data)
+        case "Boolean":
+          return (data === true) ? 1 : 0;
+        case "Undefined": case "Null": default:
+          return '';
+      }
     }
   }
 
