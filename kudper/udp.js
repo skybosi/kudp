@@ -83,6 +83,9 @@
         onWdone: (...args) => {
           LOG.info("kudper onWdone:", ...args);
         },
+        onRdone(...args) {
+          LOG.info("kudper onRdone:", ...args);
+        }
       });
       this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
       this.pool = {};           // 接收数据包池子
@@ -221,8 +224,8 @@
 
     // 处理不同的数据内容类型
     _handleContentType(content_type, data) {
-      LOG.debug("compare1:", this.ori)
-      LOG.debug("compare2:", data.message)
+      // LOG.debug("compare1:", this.ori)
+      // LOG.debug("compare2:", data.message)
       LOG.info("compare:", this.ori == data.message)
       switch (content_type) {
         case WORD:
@@ -287,10 +290,10 @@
             this.pool[isn]['content'] = Buffer.concat([this.pool[isn]['content'], payload]);
           }
           if (kudp.DONED === mtype) {
-            var file = new File('fdjkudptmp');
+            var file = new File('fdjkudptmp' + Math.ceil(Math.random() * 1000));
             file.write(this.pool[isn]['content']);
             file.close();
-            let a = file.read();
+            // let a = file.read();
             data.message = this.pool[isn]['content'].toString();
             this._handleContentType(this.pool[isn]['content_type'].toString(), data);
             delete this.pool[isn];
