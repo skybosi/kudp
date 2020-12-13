@@ -248,20 +248,35 @@
       return this.kudp.close(fd);
     }
 
-    sendTo(fd, payload, ip, port) {
+    sendTo(fd, payload) {
       this.ori = payload
-      let PACK_SIZE = utils.IsLanIP(ip) ? kudp.WAN_PACK_SIZE : kudp.LAN_PACK_SIZE;
+      let self = this;
+      let peer = this.kudp.fstat(fd);
+      let PACK_SIZE = utils.IsLanIP(peer.ip) ? kudp.WAN_PACK_SIZE : kudp.LAN_PACK_SIZE;
       let buff = Buffer.from(WORD + payload);
+      // let buff = WORD + payload;
       let psize = buff.length;
       let times = Math.ceil(psize / PACK_SIZE);
       LOG.debug("sendTo:", psize)
-      for (let i = 0; i < times; ++i) {
-        let data = buff.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
-        if (i + 1 === times)
-          this.kudp.write(fd, data, ip, port, kudp.DONED);
-        else
-          this.kudp.write(fd, data, ip, port);
+
+      function chunked(ctx) {
+        let { i, times, seq } = ctx;
+        let isn = seq, type = null;
+        while (true) {
+          let data = buff.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
+          let flag = (i + 1 === times) ? kudp.DONED : kudp.BEGIN;
+          let { size, seq, mtype } = self.kudp.write(fd, peer.ip, peer.port, data, flag);
+          type = mtype;
+          if (type === kudp.BEGIN) isn = seq;
+          if (kudp.DONED === type)
+            break;
+          if (size < 0)
+            break;
+          i++;
+        }
+        (type !== kudp.DONED) && self.kudp.chunked(chunked, { fd: fd, i: i, times: times, seq: isn });
       }
+      chunked({ fd: fd, i: 0, times: times });
       return 0;
     }
 
