@@ -21,6 +21,7 @@ import { LAN_PACK_SIZE, WAN_PACK_SIZE, } from '../lib/constant';
   const kudp = require('../lib/kudp').kudp
   const utils = require('../lib/common/utils')
   const ByteStream = require('../../stream/stream').ByteStream
+  const WriteStream = require('../../stream/stream').WriteStream
 
   const IDLEN = 5
   const IDMAX = Math.pow(10, IDLEN)
@@ -230,8 +231,18 @@ import { LAN_PACK_SIZE, WAN_PACK_SIZE, } from '../lib/constant';
       let PACK_SIZE = utils.IsLanIP(peer.ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
       let buff = new ByteStream(WORD + payload);
       let psize = buff.length;
+      let times = Math.ceil(psize / PACK_SIZE);
       console.debug("sendTo:", psize)
-      self.kudp.write(fd, peer.ip, peer.port, buff);
+      let i = 0
+      while (true) {
+        let data = buff.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
+        let flag = (i === 0) ? BEGIN : (i + 1 == times ? DONED : DOING);
+        self.kudp.write(fd, peer.ip, peer.port, data, flag);
+        if (flag == DONED) {
+          break
+        }
+        i++
+      }
       return 0;
     }
 
@@ -254,10 +265,18 @@ import { LAN_PACK_SIZE, WAN_PACK_SIZE, } from '../lib/constant';
             this.pool[RqID] = {}
             this.pool[RqID]['content_type'] = payload.read(0, 1);
             this.pool[RqID]['content'] = payload.slice(1);
+            this.log = new WriteStream(RqID, {
+              flags: 'w+',
+              mode: 0o666,
+              autoClose: true,
+              start: 0,
+            })
+            this.log.write(payload.slice(1));
           } else {
             this.pool[RqID]['content'] = ByteStream.concat([this.pool[RqID]['content'], payload]);
+            this.log.write(payload.slice(1));
           }
-          if (kudp.DONED === mtype) {
+          if (DONED === mtype) {
             var file = new File('fdjkudptmp' + Math.ceil(Math.random() * 1000));
             file.write(this.pool[RqID]['content']);
             file.close();
