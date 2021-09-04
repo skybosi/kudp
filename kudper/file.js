@@ -29,12 +29,12 @@
      * @param {*} data  要写入的文本或二进制数据
      * @param {*} encoding  指定写入文件的字符编码
      */
-    function writeFile(buffer, path, data, encoding) {
+    function writeFile(ctx, buffer, data) {
         var bsize = buffer._woffset, dsize = data.length
         if (bsize + dsize < buffer.length) {
             buffer.writeBuffer(data);
         } else {
-            this.flush(data);
+            ctx.flush(data);
         }
     }
 
@@ -54,7 +54,7 @@
     }
 
     File.prototype.write = function write(data, encoding) {
-        writeFile(this.buffer, this.path, data, encoding)
+        writeFile(this, this.buffer, data, encoding)
     }
 
     File.prototype.read = function read(offset, length, encoding) {
