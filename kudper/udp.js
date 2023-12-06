@@ -1,6 +1,13 @@
 /**
  * Tks https://github.com/skybosi/kudp
  */
+import {
+  BROAD, MULTI, BEGIN, DOING, DONED, BDD,
+  ABROAD, AMULTI, ABEGIN, ADOING, ADONED, ABDD,
+} from '../lib/kupack'
+
+import { LAN_PACK_SIZE, WAN_PACK_SIZE, } from '../lib/constant';
+
 (function (root, factory) {
   'use strict'
   if (typeof define === 'function' && define.amd) define([], factory)
@@ -11,36 +18,14 @@
 
   const File = require('./file')
   const cache = require('./cache')
-  const kudp = require('../lib/kudp')
+  const kudp = require('../lib/kudp').kudp
   const utils = require('../lib/common/utils')
-  const Buffer = require('../lib/common/Buffer/Buffer')
+  const ByteStream = require('../../stream/stream').ByteStream
+  const WriteStream = require('../../stream/stream').WriteStream
 
   const IDLEN = 5
   const IDMAX = Math.pow(10, IDLEN)
   const EXPIRE = 60000 // 60s
-
-  var LOG = {}
-  LOG.level_ = {
-    debug: 0,
-    info: 1,
-    warn: 2,
-    error: 3,
-    fatal: 4
-  }
-  LOG.level = 'info';
-  LOG.func = function (funcName) {
-    return function (...msg) {
-      if (LOG.level_[funcName] < LOG.level_[LOG.level]) { return; }
-      if (console && console[funcName]) {
-        console[funcName](...msg);
-      }
-    };
-  };
-  LOG.warn = LOG.func('warn');
-  LOG.debug = LOG.func('log');
-  LOG.error = LOG.func('error');
-  LOG.info = LOG.func('info');
-
 
   const WORD = '0'   // ascii byte 48
   const TEXT = '1'   // ascii byte 49
@@ -56,35 +41,27 @@
     [VIDEO]: 'VIDEO',
   }
 
-  const rMsgType = {
-    "WORD": WORD,
-    "TEXT": TEXT,
-    "IMAGE": IMAGE,
-    "AUDIO": AUDIO,
-    "VIDEO": VIDEO,
-  }
-
   // 业务基于kudp 实现业务功能
   class kudper {
     constructor(port, event) {
       // 用于与业务层的事件通知，将通知上报到业务层
       this.event = event;
       this.online = { length: 0 };
-      this.kudp = new kudp.kudp(port, {
+      this.kudp = new kudp(port, {
         onRead: this.recvFrom.bind(this),
         onStat: this.statist.bind(this),
         onWerr: (...args) => {
-          LOG.error("kudper onErrs", ...args);
+          console.error("kudper onErrs", ...args);
           wx.showToast({
             title: '网络有点小问题',
             icon: 'loading'
           });
         },
         onWdone: (...args) => {
-          LOG.info("kudper onWdone:", ...args);
+          console.log("kudper onWdone:", ...args);
         },
         onRdone(...args) {
-          LOG.info("kudper onRdone:", ...args);
+          console.log("kudper onRdone:", ...args);
         }
       });
       this.id = this.getId();   // 获取随机分配的设备id，用于唯一标识
@@ -152,7 +129,7 @@
         port: port
       };
       this.online[address] = id;
-      LOG.info("addOnline +++: ", this.online[id]);
+      console.log("addOnline +++: ", this.online[id]);
       return this.online[id];
     }
 
@@ -163,7 +140,7 @@
         delete this.online[id];
         delete this.online[one.address];
         this.online.length--;
-        LOG.info("delOnline --: ", one);
+        console.log("delOnline --: ", one);
       }
       return one;
     }
@@ -180,7 +157,7 @@
         case '@':
           return this._handleLocal(data);
         case '+':
-          one = this._addOnline(data.message, data.IPinfo.address, data.IPinfo.port);
+          one = this._addOnline(data.message, data.ip, data.port);
           break;
         case '-':
           one = this._delOnline(data.message);
@@ -195,7 +172,7 @@
 
     // 处理[LOCAL数据包]设备ip地址获取的功能
     _handleLocal(data) {
-      let one = this._addOnline(data.message, data.IPinfo.address, data.IPinfo.port);
+      let one = this._addOnline(data.message, data.ip, data.port);
       if (data.message == this.id) {
         one.id = this.id;
         data.id = this.id;
@@ -203,7 +180,7 @@
         this.event.emit("onMessage", data);
       } else {
         // 向新上线的用户推送所有在线
-        this.kudp.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
+        this.kudp.sync(data.ip, data.port, '+' + this.id);
       }
       return one;
     }
@@ -211,22 +188,22 @@
     // 处理多播情况 TODO
     _handleMulti(data) {
       // 此时message 是当前上线的用户id
-      let one = this._addOnline(data.peerId, data.IPinfo.address, data.IPinfo.port);
+      let one = this._addOnline(data.peerId, data.ip, data.port);
       // 如果是本设备
       if (data.peerId == this.id) {
         data.id = this.id;
         this.event.emit("onMessage", data);
       } else {
         // 向新上线的用户推送所有在线
-        this.kudp.sync(data.IPinfo.address, data.IPinfo.port, '+' + this.id);
+        this.kudp.sync(data.ip, data.port, '+' + this.id);
       }
     }
 
     // 处理不同的数据内容类型
     _handleContentType(content_type, data) {
-      // LOG.debug("compare1:", this.ori)
-      // LOG.debug("compare2:", data.message)
-      LOG.info("compare:", this.ori == data.message)
+      // console.debug("compare1:", this.ori)
+      // console.debug("compare2:", data.message)
+      console.log("compare:", this.ori == data.message)
       switch (content_type) {
         case WORD:
           this.event.emit("onMessage", data);
@@ -249,72 +226,67 @@
     }
 
     sendTo(fd, payload) {
-      this.ori = payload
       let self = this;
       let peer = this.kudp.fstat(fd);
-      let PACK_SIZE = utils.IsLanIP(peer.ip) ? kudp.WAN_PACK_SIZE : kudp.LAN_PACK_SIZE;
-      let buff = Buffer.from(WORD + payload);
-      // let buff = WORD + payload;
+      let PACK_SIZE = utils.IsLanIP(peer.ip) ? WAN_PACK_SIZE : LAN_PACK_SIZE;
+      let buff = new ByteStream(WORD + payload);
       let psize = buff.length;
       let times = Math.ceil(psize / PACK_SIZE);
-      LOG.debug("sendTo:", psize)
-
-      function chunked(ctx) {
-        let { i, times, seq } = ctx;
-        let isn = seq, type = null;
-        while (true) {
-          let data = buff.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
-          let flag = (i + 1 === times) ? kudp.DONED : kudp.BEGIN;
-          let { size, seq, mtype } = self.kudp.write(fd, peer.ip, peer.port, data, flag);
-          type = mtype;
-          if (type === kudp.BEGIN) isn = seq;
-          if (kudp.DONED === type)
-            break;
-          if (size < 0)
-            break;
-          i++;
+      console.debug("sendTo:", psize)
+      let i = 0
+      while (true) {
+        let data = buff.slice(i * PACK_SIZE, (i + 1) * PACK_SIZE + 1);
+        let flag = (i === 0) ? BEGIN : (i + 1 == times ? DONED : DOING);
+        self.kudp.write(fd, peer.ip, peer.port, data, flag);
+        if (flag == DONED) {
+          break
         }
-        (type !== kudp.DONED) && self.kudp.chunked(chunked, { fd: fd, i: i, times: times, seq: isn });
+        i++
       }
-      chunked({ fd: fd, i: 0, times: times });
       return 0;
     }
 
-    recvFrom(isn, mtype, seq, peerInfo, payload) {
-      let data = {
-        isn: isn, seq: seq, message: payload,
-        IPinfo: peerInfo, iPint: peerInfo.ipint,
-      };
+    recvFrom(ip, port, mtype, RqID, seq, payload) {
+      let message = payload
+      let data = { ip, port, RqID, seq, message };
       // 数据传输类型
       switch (mtype) {
-        case kudp.BROAD:
-          console.info("online", this.online);
+        case BROAD:
+          console.log("online", this.online);
           data.message = data.message.toString();
           this._handleSync(data);
           break;
-        case kudp.MULTI:
+        case MULTI:
           data.message = data.message.toString();
           this._handleMulti(data);
           break;
-        case kudp.BEGIN: case kudp.DOING: case kudp.DONED:
-          if (!this.pool[isn]) {
-            this.pool[isn] = {}
-            this.pool[isn]['content_type'] = payload.read(0, 1);
-            this.pool[isn]['content'] = payload.slice(1);
+        case BEGIN: case DOING: case DONED:
+          if (!this.pool[RqID]) {
+            this.pool[RqID] = {}
+            this.pool[RqID]['content_type'] = payload.read(0, 1);
+            this.pool[RqID]['content'] = payload.slice(1);
+            this.log = new WriteStream(RqID, {
+              flags: 'w+',
+              mode: 0o666,
+              autoClose: true,
+              start: 0,
+            })
+            this.log.write(payload.slice(1));
           } else {
-            this.pool[isn]['content'] = Buffer.concat([this.pool[isn]['content'], payload]);
+            this.pool[RqID]['content'] = ByteStream.concat([this.pool[RqID]['content'], payload]);
+            this.log.write(payload.slice(1));
           }
-          if (kudp.DONED === mtype) {
+          if (DONED === mtype) {
             var file = new File('fdjkudptmp' + Math.ceil(Math.random() * 1000));
-            file.write(this.pool[isn]['content']);
+            file.write(this.pool[RqID]['content']);
             file.close();
             // let a = file.read();
-            data.message = this.pool[isn]['content'].toString();
-            this._handleContentType(this.pool[isn]['content_type'].toString(), data);
-            delete this.pool[isn];
+            data.message = this.pool[RqID]['content'].toString();
+            this._handleContentType(this.pool[RqID]['content_type'].toString(), data);
+            delete this.pool[RqID];
           }
           break;
-        case kudp.BDD:
+        case BDD:
           this.content_type = payload.read(0, 1);
           payload = payload.slice(1);
           data.message = payload.toString();
@@ -327,7 +299,7 @@
     }
 
     sendFile(fd, path, ip, port) {
-      LOG.info("sendFile: ", fd, path, ip, port)
+      console.log("sendFile: ", fd, path, ip, port)
     }
 
     // 工具方法
@@ -367,7 +339,7 @@
         return;
       let format_str = ""
       for (let key in stat.props) {
-        // LOG.info(key, stat.props[key]);
+        // console.log(key, stat.props[key]);
         if ('pgc' == key) {
           format_str = format_str + "\n" + "发送数据包：" + stat.props[key]
         } else if ('rpgc' == key) {
